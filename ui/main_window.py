@@ -1,337 +1,560 @@
 import logging
 import random
-import threading
-import time
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
 
-from models.blockchain import Blockchain, TRANSACTIONS_PER_BLOCK, BLOCK_TIMEOUT_SECONDS
+from PyQt6.QtCore import QRectF, Qt, QTimer
+from PyQt6.QtGui import QBrush, QColor, QCursor, QFont, QPen
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QDialog,
+    QDoubleSpinBox,
+    QFrame,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsTextItem,
+    QGraphicsView,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
 from models.block import Block
+from models.blockchain import BLOCK_TIMEOUT_SECONDS, TRANSACTIONS_PER_BLOCK, Blockchain
 from models.transaction import Transaction
 from services.attack_simulator import AttackSimulator
+from ui.styles import DARK_QSS
 
 logger = logging.getLogger(__name__)
 
-_REFS      = ["ПЕР-{:04d}".format(n) for n in range(1001, 1100)]
-_SENDERS   = ["КЛИЕНТ-{:04d}".format(n) for n in range(101, 200)]
+_REFS = ["ПЕР-{:04d}".format(n) for n in range(1001, 1100)]
+_SENDERS = ["КЛИЕНТ-{:04d}".format(n) for n in range(101, 200)]
 _RECEIVERS = ["КЛИЕНТ-{:04d}".format(n) for n in range(201, 300)]
 _PASSPORTS = [str(random.randint(100_000_000, 999_999_999)) for _ in range(60)]
 
 
-class MainWindow:
+class ClickableBlockItem(QGraphicsRectItem):
+    def __init__(self, rect: QRectF, block_index: int, callback):
+        super().__init__(rect)
+        self.block_index = block_index
+        self.callback = callback
+        self.setAcceptHoverEvents(True)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
-    def __init__(self, root: tk.Tk, bc: Blockchain):
-        self.root = root
-        self.bc   = bc
-        self.atk  = AttackSimulator(bc)
+    def mousePressEvent(self, event):
+        self.callback(self.block_index)
+        super().mousePressEvent(event)
 
-        self._timer_job       = None
-        self._timer_running   = False
+
+class MainWindow(QMainWindow):
+    _VIS_BW = 260
+    _VIS_BH = 118
+    _VIS_GAP = 62
+    _VIS_Y = 26
+    _VIS_X0 = 24
+
+    _MK_NODE_W = 270
+    _MK_NODE_H = 54
+    _MK_H_GAP = 18
+    _MK_V_GAP = 66
+    _MK_PAD = 28
+
+    def __init__(self, bc: Blockchain):
+        super().__init__()
+        self.bc = bc
+        self.atk = AttackSimulator(bc)
+
+        self._timer_running = False
         self._timer_remaining = 0
-        self._auto_running    = False
-        self._auto_thread     = None
-        self._auto_scenario   = 0
-        self._vis_selected    = None
+        self._auto_running = False
+        self._auto_scenario = 0
+        self._auto_generated = 0
+        self._auto_target = 0
+        self._auto_interval_ms = 0
+        self._auto_waiting_next = False
+        self._vis_selected = None
 
-        root.title("Мгновенные переводы — Hash-цепочка")
-        root.geometry("1200x750")
-        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.block_timer = QTimer(self)
+        self.block_timer.setInterval(1000)
+        self.block_timer.timeout.connect(self._tick_block_timer)
 
-        nb = ttk.Notebook(root)
-        nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.nb = nb
+        self.auto_timer = QTimer(self)
+        self.auto_timer.timeout.connect(self._on_auto_timer)
 
-        tab1 = ttk.Frame(nb); nb.add(tab1, text="  Перевод  ")
-        tab2 = ttk.Frame(nb); nb.add(tab2, text="  Блоки  ")
-        tab3 = ttk.Frame(nb); nb.add(tab3, text="  Атака и проверка  ")
+        self.setWindowTitle("Мгновенные переводы - Hash-цепочка")
+        self.resize(1280, 780)
+        self.setMinimumSize(1040, 680)
+        self.setStyleSheet(DARK_QSS)
 
-        self._build_tx_tab(tab1)
-        self._build_blocks_tab(tab2)
-        self._build_attack_tab(tab3)
+        self._build_shell()
+        self._update_dashboard()
+        self.refresh_blocks()
+        self.statusBar().showMessage("Готово")
 
-        bar = tk.Frame(root, bd=1, relief=tk.SUNKEN)
-        bar.pack(fill=tk.X)
-        self.status_var = tk.StringVar(value="Готово")
-        tk.Label(bar, textvariable=self.status_var, anchor=tk.W, padx=6
-                 ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.timer_var = tk.StringVar(value="")
-        tk.Label(bar, textvariable=self.timer_var, anchor=tk.E, padx=6, fg="navy"
-                 ).pack(side=tk.RIGHT)
+    def _build_shell(self):
+        root = QWidget()
+        root.setObjectName("appRoot")
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-    # Вкладка 1 — Перевод
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(224)
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(18, 20, 18, 18)
+        side_layout.setSpacing(12)
 
-    def _build_tx_tab(self, parent):
-        form = ttk.LabelFrame(parent, text=" Новый перевод ")
-        form.pack(fill=tk.X, padx=12, pady=8)
+        brand = QLabel("CHEAIN")
+        brand.setObjectName("brand")
+        subtitle = QLabel("Hash-chain lab")
+        subtitle.setObjectName("sidebarSubtitle")
+        side_layout.addWidget(brand)
+        side_layout.addWidget(subtitle)
+        side_layout.addSpacing(18)
+
+        self.nav_buttons = []
+        self.nav_buttons.append(self._nav_button("Переводы", 0))
+        self.nav_buttons.append(self._nav_button("Цепочка", 1))
+        self.nav_buttons.append(self._nav_button("Атаки", 2))
+        for button in self.nav_buttons:
+            side_layout.addWidget(button)
+        side_layout.addStretch()
+
+        self.side_hint = QLabel("Локальная демонстрация блоков, хешей, Merkle root и атак на копию цепочки.")
+        self.side_hint.setObjectName("sideHint")
+        self.side_hint.setWordWrap(True)
+        side_layout.addWidget(self.side_hint)
+
+        content = QWidget()
+        content.setObjectName("content")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 20, 24, 18)
+        content_layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        title = QLabel("Мгновенные переводы")
+        title.setObjectName("pageTitle")
+        caption = QLabel("Темная панель управления цепочкой блоков и симуляцией атак")
+        caption.setObjectName("pageCaption")
+        title_box.addWidget(title)
+        title_box.addWidget(caption)
+        header.addLayout(title_box)
+        header.addStretch()
+        content_layout.addLayout(header)
+
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+        self.pool_card = self._stat_card("Пул", f"0 / {TRANSACTIONS_PER_BLOCK}")
+        self.blocks_card = self._stat_card("Блоков", str(len(self.bc.chain)))
+        self.timer_card = self._stat_card("Таймер", "ожидание")
+        self.copy_card = self._stat_card("Копия", "нет")
+        for card, _title, _value in (
+            self.pool_card,
+            self.blocks_card,
+            self.timer_card,
+            self.copy_card,
+        ):
+            cards.addWidget(card)
+        content_layout.addLayout(cards)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._build_transfer_page())
+        self.pages.addWidget(self._build_chain_page())
+        self.pages.addWidget(self._build_attack_page())
+        content_layout.addWidget(self.pages, 1)
+
+        root_layout.addWidget(sidebar)
+        root_layout.addWidget(content, 1)
+        self.setCentralWidget(root)
+        self._switch_page(0)
+
+    def _nav_button(self, text: str, page_index: int) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName("navButton")
+        button.setCheckable(True)
+        button.clicked.connect(lambda _checked=False, idx=page_index: self._switch_page(idx))
+        return button
+
+    def _switch_page(self, index: int):
+        self.pages.setCurrentIndex(index)
+        for i, button in enumerate(self.nav_buttons):
+            button.setChecked(i == index)
+
+    def _stat_card(self, title: str, value: str):
+        frame = QFrame()
+        frame.setObjectName("statCard")
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
+
+        title_label = QLabel(title)
+        title_label.setProperty("role", "statTitle")
+        value_label = QLabel(value)
+        value_label.setProperty("role", "statValue")
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        return frame, title_label, value_label
+
+    def _panel(self, title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("panel")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        if title:
+            label = QLabel(title)
+            label.setObjectName("panelTitle")
+            layout.addWidget(label)
+        return frame, layout
+
+    def _button(self, text: str, variant: str = "neutral") -> QPushButton:
+        button = QPushButton(text)
+        button.setProperty("variant", variant)
+        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        return button
+
+    def _build_transfer_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(14)
+
+        form_panel, form_layout = self._panel("Новый перевод")
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
+        self.entries = {
+            "reference": QLineEdit(),
+            "sender": QLineEdit(),
+            "receiver": QLineEdit(),
+            "passport": QLineEdit(),
+        }
+        self.amount_input = QDoubleSpinBox()
+        self.amount_input.setRange(0, 1_000_000_000)
+        self.amount_input.setDecimals(2)
+        self.amount_input.setSingleStep(1000)
+        self.amount_input.setGroupSeparatorShown(True)
+        self.commission_input = QDoubleSpinBox()
+        self.commission_input.setRange(0, 99.99)
+        self.commission_input.setDecimals(2)
+        self.commission_input.setSingleStep(0.1)
+        self.commission_input.setSuffix(" %")
 
         fields = [
-            ("Номер перевода:",       "reference"),
-            ("Отправитель:",          "sender"),
-            ("Получатель:",           "receiver"),
-            ("Идентификационный номер паспорта:",       "passport"),
-            ("Сумма перевода:",       "amount"),
-            ("Комиссия (%):",         "commission"),
+            ("Номер перевода", self.entries["reference"]),
+            ("Отправитель", self.entries["sender"]),
+            ("Получатель", self.entries["receiver"]),
+            ("Паспорт", self.entries["passport"]),
+            ("Сумма", self.amount_input),
+            ("Комиссия", self.commission_input),
         ]
-        self.entries = {}
-        for row, (label, key) in enumerate(fields):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky=tk.E,
-                                             padx=(8, 4), pady=4)
-            e = ttk.Entry(form, width=32)
-            e.grid(row=row, column=1, sticky=tk.W, pady=4)
-            self.entries[key] = e
+        for row, (label_text, widget) in enumerate(fields):
+            label = QLabel(label_text)
+            label.setProperty("role", "fieldLabel")
+            form.addWidget(label, row, 0)
+            form.addWidget(widget, row, 1)
+        form.setColumnStretch(1, 1)
+        form_layout.addLayout(form)
 
-        btns = ttk.Frame(parent)
-        btns.pack(fill=tk.X, padx=12, pady=4)
-        ttk.Button(btns, text="Добавить перевод",
-                   command=self._add_tx).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btns, text="Запечатать блок",
-                   command=self._force_seal).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btns, text="Демо-данные",
-                   command=self._fill_demo).pack(side=tk.LEFT)
+        actions = QHBoxLayout()
+        add_btn = self._button("Добавить перевод", "primary")
+        add_btn.clicked.connect(self._add_tx)
+        seal_btn = self._button("Запечатать блок", "neutral")
+        seal_btn.clicked.connect(self._force_seal)
+        demo_btn = self._button("Демо-данные", "ghost")
+        demo_btn.clicked.connect(self._fill_demo)
+        actions.addWidget(add_btn)
+        actions.addWidget(seal_btn)
+        actions.addWidget(demo_btn)
+        actions.addStretch()
+        form_layout.addLayout(actions)
 
-        pool_row = ttk.Frame(parent)
-        pool_row.pack(fill=tk.X, padx=12, pady=2)
-        self.pool_var = tk.StringVar(value=f"Пул: 0 / {TRANSACTIONS_PER_BLOCK}")
-        ttk.Label(pool_row, textvariable=self.pool_var).pack(side=tk.LEFT, padx=(0, 20))
-        self.scenario_var = tk.StringVar(value="")
-        ttk.Label(pool_row, textvariable=self.scenario_var, foreground="blue"
-                  ).pack(side=tk.LEFT)
+        auto_panel, auto_layout = self._panel("Авто-генератор")
+        auto_row = QHBoxLayout()
+        self.btn_start = self._button("Запустить", "primary")
+        self.btn_start.clicked.connect(self._start_auto)
+        self.btn_stop = self._button("Остановить", "danger")
+        self.btn_stop.clicked.connect(self._stop_auto)
+        self.btn_stop.setEnabled(False)
+        self.auto_status = QLabel("")
+        self.auto_status.setObjectName("mutedLabel")
+        self.auto_status.setWordWrap(True)
+        auto_row.addWidget(self.btn_start)
+        auto_row.addWidget(self.btn_stop)
+        auto_row.addWidget(self.auto_status, 1)
+        auto_layout.addLayout(auto_row)
+        scenario_hint = QLabel(
+            "Сценарий 1: 5 переводов x 9 сек -> блок по количеству. "
+            "Сценарий 2: 3 перевода x 22 сек -> блок по таймеру."
+        )
+        scenario_hint.setObjectName("mutedLabel")
+        scenario_hint.setWordWrap(True)
+        auto_layout.addWidget(scenario_hint)
 
-        gen = ttk.LabelFrame(parent, text=" Авто-генератор ")
-        gen.pack(fill=tk.X, padx=12, pady=4)
-        gen_inner = ttk.Frame(gen)
-        gen_inner.pack(pady=6, padx=8, fill=tk.X)
-        self.btn_start = ttk.Button(gen_inner, text="▶ Запустить", command=self._start_auto)
-        self.btn_start.pack(side=tk.LEFT, padx=(0, 6))
-        self.btn_stop = ttk.Button(gen_inner, text="■ Остановить",
-                                   command=self._stop_auto, state="disabled")
-        self.btn_stop.pack(side=tk.LEFT, padx=(0, 16))
-        self.auto_status = tk.StringVar(value="")
-        ttk.Label(gen_inner, textvariable=self.auto_status, foreground="gray"
-                  ).pack(side=tk.LEFT)
-        ttk.Label(gen, foreground="gray",
-                  text="Сценарий 1: 5 переводов × 9 сек  → блок по количеству\n"
-                       "Сценарий 2: 3 перевода  × 22 сек → блок по таймеру (60 сек)"
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
+        left_layout.addWidget(form_panel)
+        left_layout.addWidget(auto_panel)
+        left_layout.addStretch()
 
-        ttk.Label(parent, text="Журнал:").pack(anchor=tk.W, padx=12)
-        self.log = scrolledtext.ScrolledText(parent, height=9, state="disabled",
-                                             font=("Courier", 9))
-        self.log.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        log_panel, log_layout = self._panel("Журнал переводов")
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(1200)
+        log_layout.addWidget(self.log)
 
-    # Вкладка 2 — Блоки
+        splitter.addWidget(left)
+        splitter.addWidget(log_panel)
+        splitter.setSizes([470, 650])
+        layout.addWidget(splitter)
+        return page
 
-    # Константы отрисовки цепочки (chain canvas)
-    _VIS_BW   = 240   # ширина блока
-    _VIS_BH   = 108   # высота блока
-    _VIS_GAP  = 46    # расстояние для стрелки
-    _VIS_Y    = 18    # отступ сверху
-    _VIS_X0   = 16    # отступ слева
+    def _build_chain_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
 
-    # Константы отрисовки дерева Меркла
-    _MK_NODE_W = 250
-    _MK_NODE_H = 46
-    _MK_H_GAP  = 10
-    _MK_V_GAP  = 56
-    _MK_PAD    = 20
+        vis_panel, vis_layout = self._panel("Визуальная цепочка")
+        self.vis_scene = QGraphicsScene(self)
+        self.vis_view = QGraphicsView(self.vis_scene)
+        self.vis_view.setObjectName("graphicsView")
+        self.vis_view.setMinimumHeight(188)
+        self.vis_view.setRenderHints(self.vis_view.renderHints())
+        vis_layout.addWidget(self.vis_view)
+        layout.addWidget(vis_panel)
 
-    def _build_blocks_tab(self, parent):
-        # ── Визуализация цепочки ──────────────────────────────────────
-        vis_frame = ttk.LabelFrame(parent, text=" Цепочка блоков ")
-        vis_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
 
-        canvas_h = self._VIS_Y + self._VIS_BH + 30
-        self.vis_canvas = tk.Canvas(vis_frame, height=canvas_h,
-                                    bg="#f5f5f5", highlightthickness=0)
-        hscroll = ttk.Scrollbar(vis_frame, orient="horizontal",
-                                 command=self.vis_canvas.xview)
-        self.vis_canvas.configure(xscrollcommand=hscroll.set)
-        self.vis_canvas.pack(fill=tk.X, expand=False)
-        hscroll.pack(fill=tk.X)
+        table_panel, table_layout = self._panel("Блоки")
+        self.blocks_table = QTableWidget(0, 5)
+        self.blocks_table.setHorizontalHeaderLabels(["Блок", "Хеш", "Пред. хеш", "TX", "Время"])
+        self.blocks_table.verticalHeader().setVisible(False)
+        self.blocks_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.blocks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.blocks_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.blocks_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.blocks_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.blocks_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.blocks_table.itemSelectionChanged.connect(self._show_block_details)
+        table_layout.addWidget(self.blocks_table)
 
-        # ── Таблица блоков ────────────────────────────────────────────
-        top = ttk.Frame(parent)
-        top.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        table_actions = QHBoxLayout()
+        refresh_btn = self._button("Обновить", "neutral")
+        refresh_btn.clicked.connect(self.refresh_blocks)
+        merkle_btn = self._button("Дерево Меркла", "primary")
+        merkle_btn.clicked.connect(self._open_merkle_window)
+        table_actions.addWidget(refresh_btn)
+        table_actions.addWidget(merkle_btn)
+        table_actions.addStretch()
+        table_layout.addLayout(table_actions)
 
-        cols = ("Блок", "Хеш", "Пред. хеш", "TX", "Время")
-        self.tree = ttk.Treeview(top, columns=cols, show="headings", height=5)
-        for col, width in zip(cols, (60, 200, 200, 40, 175)):
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=width, anchor=tk.CENTER if col == "TX" else tk.W)
+        details_panel, details_layout = self._panel("Детали выбранного блока")
+        self.detail_text = QPlainTextEdit()
+        self.detail_text.setReadOnly(True)
+        details_layout.addWidget(self.detail_text)
 
-        vsb = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.LEFT, fill=tk.Y)
-        self.tree.bind("<<TreeviewSelect>>", self._show_block_details)
+        splitter.addWidget(table_panel)
+        splitter.addWidget(details_panel)
+        splitter.setSizes([570, 530])
+        layout.addWidget(splitter, 1)
+        return page
 
-        ttk.Label(parent, text="Переводы выбранного блока:").pack(anchor=tk.W, padx=8)
-        self.detail_text = scrolledtext.ScrolledText(parent, height=10, state="disabled",
-                                                     font=("Courier", 9))
-        self.detail_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-        btn_row = ttk.Frame(parent)
-        btn_row.pack(pady=(0, 6))
-        ttk.Button(btn_row, text="Обновить",
-                   command=self.refresh_blocks).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_row, text="Дерево Меркла",
-                   command=self._open_merkle_window).pack(side=tk.LEFT)
-        self.refresh_blocks()
+    def _build_attack_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
 
-    # Вкладка 3 — Атака и проверка
+        copy_panel, copy_layout = self._panel("Копия цепочки")
+        copy_row = QHBoxLayout()
+        make_copy_btn = self._button("Создать копию", "primary")
+        make_copy_btn.clicked.connect(self._make_copy)
+        self.copy_info_label = QLabel("Копия не создана")
+        self.copy_info_label.setObjectName("mutedLabel")
+        copy_row.addWidget(make_copy_btn)
+        copy_row.addWidget(self.copy_info_label, 1)
+        copy_layout.addLayout(copy_row)
+        copy_note = QLabel("Все атаки применяются только к копии. Оригинальная цепочка остается неизменной.")
+        copy_note.setObjectName("mutedLabel")
+        copy_note.setWordWrap(True)
+        copy_layout.addWidget(copy_note)
+        layout.addWidget(copy_panel)
 
-    def _build_attack_tab(self, parent):
-        # ── Секция 1: работа с копией
-        copy_lf = ttk.LabelFrame(parent, text=" Копия цепочки для атаки ")
-        copy_lf.pack(fill=tk.X, padx=12, pady=(8, 4))
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
 
-        copy_row = ttk.Frame(copy_lf)
-        copy_row.pack(pady=6, padx=8, fill=tk.X)
+        attack_panel, attack_layout = self._panel("Тип атаки")
+        self.attack_tabs = QTabWidget()
+        self.attack_tabs.addTab(self._attack_tamper_tab(), "Подделать сумму")
+        self.attack_tabs.addTab(self._attack_sender_tab(), "Подмена отправителя")
+        self.attack_tabs.addTab(self._attack_drop_tab(), "Удалить TX")
+        self.attack_tabs.addTab(self._attack_replay_tab(), "Повтор")
+        self.attack_tabs.addTab(self._attack_51_tab(), "Атака 51%")
+        attack_layout.addWidget(self.attack_tabs)
 
-        ttk.Button(copy_row, text="Создать копию",
-                   command=self._make_copy).pack(side=tk.LEFT, padx=(0, 12))
+        validation_panel, validation_layout = self._panel("Проверка и журнал")
+        validation_buttons = QHBoxLayout()
+        val_orig_btn = self._button("Проверить оригинал", "neutral")
+        val_orig_btn.clicked.connect(self._validate_original)
+        val_copy_btn = self._button("Проверить копию", "primary")
+        val_copy_btn.clicked.connect(self._validate_copy)
+        validation_buttons.addWidget(val_orig_btn)
+        validation_buttons.addWidget(val_copy_btn)
+        validation_buttons.addStretch()
+        validation_layout.addLayout(validation_buttons)
 
-        self.copy_info_var = tk.StringVar(value="Копия не создана")
-        ttk.Label(copy_row, textvariable=self.copy_info_var, foreground="gray"
-                  ).pack(side=tk.LEFT)
+        self.val_orig_label = QLabel("")
+        self.val_copy_label = QLabel("")
+        for label in (self.val_orig_label, self.val_copy_label):
+            label.setObjectName("resultLabel")
+            label.setWordWrap(True)
+            validation_layout.addWidget(label)
 
-        ttk.Label(copy_lf, foreground="gray",
-                  text="Атака применяется к копии — оригинальная цепочка не изменяется."
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
+        self.atk_log = QPlainTextEdit()
+        self.atk_log.setReadOnly(True)
+        self.atk_log.setMaximumBlockCount(1500)
+        validation_layout.addWidget(self.atk_log, 1)
 
-        # ── Секция 2: типы атак (Notebook)
-        atk_lf = ttk.LabelFrame(parent, text=" Тип атаки ")
-        atk_lf.pack(fill=tk.X, padx=12, pady=4)
+        splitter.addWidget(attack_panel)
+        splitter.addWidget(validation_panel)
+        splitter.setSizes([560, 560])
+        layout.addWidget(splitter, 1)
+        return page
 
-        atk_nb = ttk.Notebook(atk_lf)
-        atk_nb.pack(fill=tk.X, padx=6, pady=6)
+    def _spin(self, value: int = 0, minimum: int = 0, maximum: int = 9999) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setValue(value)
+        return spin
 
-        def _le(parent_row, text, default, width=5):
-            ttk.Label(parent_row, text=text).pack(side=tk.LEFT, padx=(0, 2))
-            e = ttk.Entry(parent_row, width=width)
-            e.insert(0, default)
-            e.pack(side=tk.LEFT, padx=(0, 10))
-            return e
+    def _attack_tamper_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = self._attack_form_layout(tab)
+        self.atk_block = self._spin(1)
+        self.atk_tx = self._spin(0)
+        self.atk_amount = QDoubleSpinBox()
+        self.atk_amount.setRange(0, 1_000_000_000)
+        self.atk_amount.setDecimals(2)
+        self.atk_amount.setValue(999999)
+        self.atk_amount.setGroupSeparatorShown(True)
+        self._add_attack_row(layout, 0, "Блок N", self.atk_block)
+        self._add_attack_row(layout, 1, "TX N", self.atk_tx)
+        self._add_attack_row(layout, 2, "Новая сумма", self.atk_amount)
+        self._add_attack_apply(layout, 3, self._attack)
+        self._add_attack_hint(layout, 4, "Изменяет сумму транзакции и пересчитывает хеш блока. Следующий блок продолжает хранить старый previous_hash.")
+        return tab
 
-        # ── Вкладка: Подделать сумму ──────────────────────────────────
-        tab_tamper = ttk.Frame(atk_nb)
-        atk_nb.add(tab_tamper, text="  Подделать сумму  ")
+    def _attack_sender_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = self._attack_form_layout(tab)
+        self.atk_rs_block = self._spin(1)
+        self.atk_rs_tx = self._spin(0)
+        self.atk_rs_sender = QLineEdit("ЗЛОУМЫШЛЕННИК")
+        self._add_attack_row(layout, 0, "Блок N", self.atk_rs_block)
+        self._add_attack_row(layout, 1, "TX N", self.atk_rs_tx)
+        self._add_attack_row(layout, 2, "Новый отправитель", self.atk_rs_sender)
+        self._add_attack_apply(layout, 3, self._attack_replace_sender)
+        self._add_attack_hint(layout, 4, "Подменяет отправителя. Подпись остается старой, поэтому проверка может обнаружить несоответствие.")
+        return tab
 
-        row1 = ttk.Frame(tab_tamper)
-        row1.pack(pady=8, padx=8, fill=tk.X)
-        self.atk_block  = _le(row1, "Блок №:", "1", 4)
-        self.atk_tx     = _le(row1, "TX №:", "0", 4)
-        self.atk_amount = _le(row1, "Новая сумма:", "999999", 10)
-        ttk.Button(row1, text="Применить",
-                   command=self._attack).pack(side=tk.LEFT)
-        ttk.Label(tab_tamper, foreground="gray",
-                  text="Изменяет сумму транзакции. Хеш блока пересчитывается,\n"
-                       "следующий блок хранит старый previous_hash → разрыв."
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
+    def _attack_drop_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = self._attack_form_layout(tab)
+        self.atk_drop_block = self._spin(1)
+        self.atk_drop_tx = self._spin(0)
+        self._add_attack_row(layout, 0, "Блок N", self.atk_drop_block)
+        self._add_attack_row(layout, 1, "TX N", self.atk_drop_tx)
+        self._add_attack_apply(layout, 2, self._attack_drop_tx)
+        self._add_attack_hint(layout, 3, "Удаляет транзакцию из блока, затем пересчитывает Merkle root и хеш блока.")
+        return tab
 
-        # ── Вкладка: Подмена отправителя ─────────────────────────────
-        tab_sender = ttk.Frame(atk_nb)
-        atk_nb.add(tab_sender, text="  Подмена отправителя  ")
+    def _attack_replay_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = self._attack_form_layout(tab)
+        self.atk_rp_src_block = self._spin(1)
+        self.atk_rp_src_tx = self._spin(0)
+        self.atk_rp_dst_block = self._spin(2)
+        self._add_attack_row(layout, 0, "Блок-источник N", self.atk_rp_src_block)
+        self._add_attack_row(layout, 1, "TX N", self.atk_rp_src_tx)
+        self._add_attack_row(layout, 2, "Блок-цель N", self.atk_rp_dst_block)
+        self._add_attack_apply(layout, 3, self._attack_replay)
+        self._add_attack_hint(layout, 4, "Копирует транзакцию в другой блок, демонстрируя повторное воспроизведение.")
+        return tab
 
-        row2 = ttk.Frame(tab_sender)
-        row2.pack(pady=8, padx=8, fill=tk.X)
-        self.atk_rs_block  = _le(row2, "Блок №:", "1", 4)
-        self.atk_rs_tx     = _le(row2, "TX №:", "0", 4)
-        self.atk_rs_sender = _le(row2, "Новый отправитель:", "ЗЛОУМЫШЛЕННИК", 16)
-        ttk.Button(row2, text="Применить",
-                   command=self._attack_replace_sender).pack(side=tk.LEFT)
-        ttk.Label(tab_sender, foreground="gray",
-                  text="Подменяет поле sender. Подпись транзакции остаётся старой —\n"
-                       "несоответствие выявится при верификации подписи."
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
+    def _attack_51_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = self._attack_form_layout(tab)
+        self.atk_51_block = self._spin(1)
+        self._add_attack_row(layout, 0, "Начальный блок N", self.atk_51_block)
+        self._add_attack_apply(layout, 1, self._attack_51)
+        self._add_attack_hint(layout, 2, "Пересчитывает previous_hash и хеши хвоста копии, имитируя переписывание цепочки.")
+        return tab
 
-        # ── Вкладка: Удалить транзакцию ───────────────────────────────
-        tab_drop = ttk.Frame(atk_nb)
-        atk_nb.add(tab_drop, text="  Удалить TX  ")
+    def _attack_form_layout(self, tab: QWidget) -> QGridLayout:
+        layout = QGridLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(12)
+        layout.setColumnStretch(1, 1)
+        return layout
 
-        row3 = ttk.Frame(tab_drop)
-        row3.pack(pady=8, padx=8, fill=tk.X)
-        self.atk_drop_block = _le(row3, "Блок №:", "1", 4)
-        self.atk_drop_tx    = _le(row3, "TX №:", "0", 4)
-        ttk.Button(row3, text="Применить",
-                   command=self._attack_drop_tx).pack(side=tk.LEFT)
-        ttk.Label(tab_drop, foreground="gray",
-                  text="Удаляет транзакцию из блока (атака цензуры).\n"
-                       "Корень Меркла и хеш пересчитываются → разрыв на следующем блоке."
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
+    def _add_attack_row(self, layout: QGridLayout, row: int, label_text: str, widget: QWidget):
+        label = QLabel(label_text)
+        label.setProperty("role", "fieldLabel")
+        layout.addWidget(label, row, 0)
+        layout.addWidget(widget, row, 1)
 
-        # ── Вкладка: Повторное воспроизведение ────────────────────────
-        tab_replay = ttk.Frame(atk_nb)
-        atk_nb.add(tab_replay, text="  Повторное воспроизведение  ")
+    def _add_attack_apply(self, layout: QGridLayout, row: int, callback):
+        button = self._button("Применить", "danger")
+        button.clicked.connect(callback)
+        layout.addWidget(button, row, 1, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        row4 = ttk.Frame(tab_replay)
-        row4.pack(pady=8, padx=8, fill=tk.X)
-        self.atk_rp_src_block = _le(row4, "Блок-источник №:", "1", 4)
-        self.atk_rp_src_tx    = _le(row4, "TX №:", "0", 4)
-        self.atk_rp_dst_block = _le(row4, "Блок-цель №:", "2", 4)
-        ttk.Button(row4, text="Применить",
-                   command=self._attack_replay).pack(side=tk.LEFT)
-        ttk.Label(tab_replay, foreground="gray",
-                  text="Дублирует транзакцию в другой блок (двойная трата).\n"
-                       "Одни и те же средства оказываются списанными дважды."
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
+    def _add_attack_hint(self, layout: QGridLayout, row: int, text: str):
+        hint = QLabel(text)
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint, row, 0, 1, 2)
 
-        # ── Вкладка: Атака 51% ────────────────────────────────────────
-        tab_51 = ttk.Frame(atk_nb)
-        atk_nb.add(tab_51, text="  Атака 51%  ")
-
-        row5 = ttk.Frame(tab_51)
-        row5.pack(pady=8, padx=8, fill=tk.X)
-        self.atk_51_block = _le(row5, "Начальный блок №:", "1", 4)
-        ttk.Button(row5, text="Применить",
-                   command=self._attack_51).pack(side=tk.LEFT)
-        ttk.Label(tab_51, foreground="gray",
-                  text="Пересчитывает previous_hash и хеши всей цепи начиная с блока.\n"
-                       "После этого validate_copy() покажет цепочку как корректную.\n"
-                       "Обнаружить подлог можно только сравнив с оригинальной цепью."
-                  ).pack(anchor=tk.W, padx=8, pady=(0, 6))
-
-        # ── Секция 3: проверка
-        check_lf = ttk.LabelFrame(parent, text=" Проверка ")
-        check_lf.pack(fill=tk.X, padx=12, pady=4)
-
-        check_row = ttk.Frame(check_lf)
-        check_row.pack(pady=8, padx=8, fill=tk.X)
-
-        ttk.Button(check_row, text="Проверить оригинал",
-                   command=self._validate_original).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(check_row, text="Проверить копию",
-                   command=self._validate_copy).pack(side=tk.LEFT)
-
-        self.val_orig = tk.StringVar(value="")
-        self.val_copy = tk.StringVar(value="")
-        self.lbl_val_orig = ttk.Label(check_lf, textvariable=self.val_orig,
-                                      font=("TkDefaultFont", 10, "bold"))
-        self.lbl_val_orig.pack(anchor=tk.W, padx=8)
-        ttk.Label(check_lf, textvariable=self.val_copy,
-                  font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=8, pady=(0, 6))
-
-        # ── Журнал
-        ttk.Label(parent, text="Журнал атак:").pack(anchor=tk.W, padx=12)
-        self.atk_log = scrolledtext.ScrolledText(parent, height=8, state="disabled",
-                                                 font=("Courier", 9))
-        self.atk_log.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
-
-    # Логика — переводы
-
-    def _add_tx(self, scenario_tag="") -> bool:
+    def _add_tx(self, scenario_tag: str = "") -> bool:
         try:
             tx = Transaction(
-                reference  = self.entries["reference"].get().strip(),
-                sender     = self.entries["sender"].get().strip(),
-                receiver   = self.entries["receiver"].get().strip(),
-                passport_raw = self.entries["passport"].get().strip(),
-                amount     = float(self.entries["amount"].get()),
-                commission = float(self.entries["commission"].get()),
+                reference=self.entries["reference"].text().strip(),
+                sender=self.entries["sender"].text().strip(),
+                receiver=self.entries["receiver"].text().strip(),
+                passport_raw=self.entries["passport"].text().strip(),
+                amount=float(self.amount_input.value()),
+                commission=float(self.commission_input.value()),
             )
             pool_was_empty = len(self.bc.pending_transactions) == 0
-            block_created  = self.bc.add_transaction(tx)
-        except ValueError as e:
-            messagebox.showerror("Ошибка ввода", str(e))
+            block_created = self.bc.add_transaction(tx)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Ошибка ввода", str(exc))
             return False
 
         tag = f"  [{scenario_tag}]" if scenario_tag else ""
@@ -347,612 +570,483 @@ class MainWindow:
             self._cancel_timer()
             n = len(self.bc.chain) - 1
             self._log(f">>> БЛОК #{n} закрыт по количеству  |  хеш: {self.bc.chain[-1].hash[:24]}...")
-            self.status_var.set(f"Блок #{n} закрыт по количеству переводов")
+            self.statusBar().showMessage(f"Блок #{n} закрыт по количеству переводов")
             self.refresh_blocks()
         elif pool_was_empty:
             self._start_timer()
 
-        self.pool_var.set(f"Пул: {len(self.bc.pending_transactions)} / {TRANSACTIONS_PER_BLOCK}")
-        for e in self.entries.values():
-            e.delete(0, tk.END)
+        self._clear_transfer_form()
+        self._update_dashboard()
         return True
+
+    def _clear_transfer_form(self):
+        for entry in self.entries.values():
+            entry.clear()
+        self.amount_input.setValue(0)
+        self.commission_input.setValue(0)
 
     def _force_seal(self):
         if not self.bc.pending_transactions:
-            messagebox.showinfo("Пул пуст", "Нет переводов для закрытия блока.")
+            QMessageBox.information(self, "Пул пуст", "Нет переводов для закрытия блока.")
             return
         self._cancel_timer()
         self.bc.seal_block()
         n = len(self.bc.chain) - 1
-        self.pool_var.set(f"Пул: 0 / {TRANSACTIONS_PER_BLOCK}")
         self._log(f">>> БЛОК #{n} закрыт принудительно  |  хеш: {self.bc.chain[-1].hash[:24]}...")
         self.refresh_blocks()
-        self.status_var.set(f"Блок #{n} закрыт принудительно")
+        self._update_dashboard()
+        self.statusBar().showMessage(f"Блок #{n} закрыт принудительно")
 
     def _fill_demo(self):
-        for key, val in {
+        values = {
             "reference": "ПЕР-1042",
-            "sender":    "КЛИЕНТ-0101",
-            "receiver":  "КЛИЕНТ-0202",
-            "passport":  "123456789",
-            "amount":    "50000",
-            "commission":"0.5",
-        }.items():
-            self.entries[key].delete(0, tk.END)
-            self.entries[key].insert(0, val)
+            "sender": "КЛИЕНТ-0101",
+            "receiver": "КЛИЕНТ-0202",
+            "passport": "123456789",
+        }
+        for key, value in values.items():
+            self.entries[key].setText(value)
+        self.amount_input.setValue(50000)
+        self.commission_input.setValue(0.5)
 
     def _log(self, msg: str):
-        self.log.config(state="normal")
-        self.log.insert(tk.END, msg + "\n" + "-" * 60 + "\n")
-        self.log.see(tk.END)
-        self.log.config(state="disabled")
+        self.log.appendPlainText(msg + "\n" + "-" * 64)
 
-    # Логика — блоки
+    def refresh_blocks(self):
+        self.blocks_table.setRowCount(len(self.bc.chain))
+        for row, block in enumerate(self.bc.chain):
+            values = [
+                f"#{block.index}" + (" (нач.)" if block.index == 0 else ""),
+                block.hash[:24] + "...",
+                block.previous_hash[:24] + "...",
+                str(len(block.transactions)),
+                block.timestamp,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col in (0, 3):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.blocks_table.setItem(row, col, item)
+        self.refresh_visualization()
+        self._update_dashboard()
 
     def refresh_visualization(self):
-        """Перерисовать canvas-цепочку блоков."""
-        c     = self.vis_canvas
+        self.vis_scene.clear()
         chain = self.bc.chain
-        BW, BH, GAP, Y0, X0 = (
-            self._VIS_BW, self._VIS_BH, self._VIS_GAP,
-            self._VIS_Y,  self._VIS_X0,
-        )
-        c.delete("all")
+        total_w = self._VIS_X0 + len(chain) * (self._VIS_BW + self._VIS_GAP) + 40
+        total_h = self._VIS_Y + self._VIS_BH + 48
+        self.vis_scene.setSceneRect(0, 0, max(total_w, 900), total_h)
 
-        n         = len(chain)
-        total_w   = X0 + n * (BW + GAP) + 20
-        scroll_h  = Y0 + BH + 30
-        c.configure(scrollregion=(0, 0, total_w, scroll_h))
+        for index, block in enumerate(chain):
+            x = self._VIS_X0 + index * (self._VIS_BW + self._VIS_GAP)
+            y = self._VIS_Y
+            selected = index == self._vis_selected
 
-        for i, block in enumerate(chain):
-            x = X0 + i * (BW + GAP)
-            y = Y0
-            tag = f"blk{i}"
-
-            # цвет фона
-            if i == self._vis_selected:
-                bg = "#1ecad3"   # выбранный — жёлтый
-                outline_w = 3
-            elif i == 0:
-                bg = "#a92e49"   # генезис — голубой
-                outline_w = 2
+            if selected:
+                bg = QColor("#1ecad3")
+                border = QColor("#d8fbff")
+            elif index == 0:
+                bg = QColor("#7c2d45")
+                border = QColor("#ff7aa2")
             else:
-                bg = "#bbc846"   # обычный — зелёный
-                outline_w = 2
+                bg = QColor("#293346")
+                border = QColor("#71f2b4")
 
-            # прямоугольник
-            c.create_rectangle(
-                x, y, x + BW, y + BH,
-                fill=bg, outline="#444", width=outline_w, tags=tag,
-            )
+            rect = ClickableBlockItem(QRectF(x, y, self._VIS_BW, self._VIS_BH), index, self._on_vis_click)
+            rect.setBrush(QBrush(bg))
+            rect.setPen(QPen(border, 2.5 if selected else 1.4))
+            self.vis_scene.addItem(rect)
 
-            # заголовок
-            title = f"Блок #{block.index}" + (" (genesis)" if i == 0 else "")
-            c.create_text(
-                x + BW // 2, y + 13,
-                text=title, font=("TkDefaultFont", 9, "bold"), tags=tag,
-            )
-            c.create_line(x + 6, y + 24, x + BW - 6, y + 24,
-                          fill="#666", tags=tag)
+            title = f"Блок #{block.index}" + ("  genesis" if index == 0 else "")
+            self._scene_text(title, x + 14, y + 10, 10, "#f8fafc", bold=True)
+            self._scene_text(f"Hash    {block.hash[:18]}...", x + 14, y + 38, 8, "#d8dee9", mono=True)
+            self._scene_text(f"Merkle  {block.merkle_root[:18]}...", x + 14, y + 60, 8, "#d8dee9", mono=True)
+            self._scene_text(f"TX {len(block.transactions)}   {block.timestamp[11:19] if block.timestamp else ''}", x + 14, y + 84, 8, "#aeb7c5", mono=True)
 
-            # поля
-            lines = [
-                f"Hash:   {block.hash[:16]}…",
-                f"Merkle: {block.merkle_root[:16]}…",
-                f"TX: {len(block.transactions)}"
-                + (f"  •  {block.timestamp[11:19]}" if block.timestamp else ""),
-            ]
-            for j, line in enumerate(lines):
-                c.create_text(
-                    x + 8, y + 36 + j * 20,
-                    anchor="w", text=line,
-                    font=("Courier", 8), tags=tag,
-                )
+            if index < len(chain) - 1:
+                ax = x + self._VIS_BW
+                ay = y + self._VIS_BH / 2
+                pen = QPen(QColor("#5f6b7a"), 2)
+                self.vis_scene.addLine(ax, ay, ax + self._VIS_GAP, ay, pen)
+                self.vis_scene.addLine(ax + self._VIS_GAP - 10, ay - 6, ax + self._VIS_GAP, ay, pen)
+                self.vis_scene.addLine(ax + self._VIS_GAP - 10, ay + 6, ax + self._VIS_GAP, ay, pen)
+                self._scene_text("prev", ax + 16, ay - 22, 7, "#8a94a6")
 
-            # номер под блоком
-            c.create_text(
-                x + BW // 2, y + BH + 12,
-                text=f"#{block.index}",
-                font=("TkDefaultFont", 8), fill="#777", tags=tag,
-            )
-
-            # стрелка к следующему блоку
-            if i < n - 1:
-                ax, ay = x + BW, y + BH // 2
-                c.create_line(
-                    ax, ay, ax + GAP, ay,
-                    arrow=tk.LAST, fill="#555", width=2,
-                )
-                # подпись «prev_hash»
-                c.create_text(
-                    ax + GAP // 2, ay - 8,
-                    text="prev", font=("TkDefaultFont", 7), fill="#888",
-                )
-
-            # клик
-            c.tag_bind(tag, "<Button-1>",
-                       lambda _e, idx=i: self._on_vis_click(idx))
+    def _scene_text(self, text: str, x: float, y: float, size: int, color: str, bold: bool = False, mono: bool = False) -> QGraphicsTextItem:
+        font = QFont("Consolas" if mono else "Segoe UI", size)
+        font.setBold(bold)
+        item = self.vis_scene.addText(text, font)
+        item.setDefaultTextColor(QColor(color))
+        item.setPos(x, y)
+        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        return item
 
     def _on_vis_click(self, block_idx: int):
         self._vis_selected = block_idx
         self.refresh_visualization()
-        # синхронизировать таблицу и детали
-        iid = str(block_idx)
-        if self.tree.exists(iid):
-            self.tree.selection_set(iid)
-            self.tree.see(iid)
+        if 0 <= block_idx < self.blocks_table.rowCount():
+            self.blocks_table.selectRow(block_idx)
             self._show_block_details()
 
-    def refresh_blocks(self):
-        self.tree.delete(*self.tree.get_children())
-        for b in self.bc.chain:
-            label = f"#{b.index}" + (" (нач.)" if b.index == 0 else "")
-            self.tree.insert("", tk.END, iid=str(b.index), values=(
-                label,
-                b.hash[:22] + "…",
-                b.previous_hash[:22] + "…",
-                len(b.transactions),
-                b.timestamp,
-            ))
+    def _show_block_details(self):
+        row = self.blocks_table.currentRow()
+        if row < 0 or row >= len(self.bc.chain):
+            return
+        self._vis_selected = row
+        block = self.bc.chain[row]
+        lines = [
+            f"Блок #{block.index}",
+            f"  Хеш:           {block.hash}",
+            f"  Пред. хеш:     {block.previous_hash}",
+            f"  Корень Меркла: {block.merkle_root}",
+            f"  Время:         {block.timestamp}",
+        ]
+
+        if block.transactions:
+            lines.append("")
+            lines.append(f"Переводы ({len(block.transactions)}):")
+            for tx in block.transactions:
+                lines.extend(
+                    [
+                        "",
+                        f"  TX {tx.transaction_id}  |  Перевод: {tx.reference}",
+                        f"  {tx.sender} -> {tx.receiver}",
+                        f"  Сумма: {tx.amount:,.2f}  |  К получению: {tx.net_amount:,.2f}  (комиссия {tx.commission}%)",
+                        f"  Хеш паспорта: {tx.passport_hash}",
+                        f"  Подпись:      {tx.signature}",
+                        f"  Хеш TX:       {tx.tx_hash}",
+                        f"  Время:        {tx.timestamp}",
+                    ]
+                )
+            lines.extend(["", "-" * 64, "Дерево Меркла:", ""])
+            lines.extend(self._merkle_text(block))
+        else:
+            lines.extend(["", "  (блок не содержит переводов)"])
+
+        self.detail_text.setPlainText("\n".join(lines))
         self.refresh_visualization()
 
-    def _show_block_details(self, _event=None):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        block = self.bc.chain[int(sel[0])]
-
-        self.detail_text.config(state="normal")
-        self.detail_text.delete("1.0", tk.END)
-        self.detail_text.insert(tk.END,
-            f"Блок #{block.index}\n"
-            f"  Хеш:          {block.hash}\n"
-            f"  Пред. хеш:    {block.previous_hash}\n"
-            f"  Корень Меркла:{block.merkle_root}\n"
-            f"  Время:        {block.timestamp}\n"
-        )
-        if block.transactions:
-            self.detail_text.insert(tk.END, f"\nПереводы ({len(block.transactions)}):\n")
-            for tx in block.transactions:
-                self.detail_text.insert(tk.END,
-                    f"\n  TX {tx.transaction_id}  |  Перевод: {tx.reference}\n"
-                    f"  {tx.sender} -> {tx.receiver}\n"
-                    f"  Сумма: {tx.amount:,.2f}  |  К получению: {tx.net_amount:,.2f}"
-                    f"  (комиссия {tx.commission}%)\n"
-                    f"  Хеш паспорта: {tx.passport_hash}\n"
-                    f"  Подпись:      {tx.signature}\n"
-                    f"  Хеш TX:       {tx.tx_hash}\n"
-                    f"  Время:        {tx.timestamp}\n"
-                )
-
-            # ── Дерево Меркла ──────────────────────────────────────────
-            self.detail_text.insert(tk.END, "\n" + "─" * 60 + "\n")
-            self.detail_text.insert(tk.END, "Дерево Меркла:\n\n")
-
-            tx_hashes = [tx.tx_hash for tx in block.transactions]
-            n_real    = len(tx_hashes)
-            levels    = Block.build_merkle_tree(tx_hashes)
-
-            # Отображаем от корня вниз к листьям
-            for lvl_idx in range(len(levels) - 1, -1, -1):
-                lvl = levels[lvl_idx]
-                if lvl_idx == len(levels) - 1:
-                    header = "Корень:"
+    def _merkle_text(self, block) -> list[str]:
+        tx_hashes = [tx.tx_hash for tx in block.transactions]
+        n_real = len(tx_hashes)
+        levels = Block.build_merkle_tree(tx_hashes)
+        lines: list[str] = []
+        for lvl_idx in range(len(levels) - 1, -1, -1):
+            level = levels[lvl_idx]
+            if lvl_idx == len(levels) - 1:
+                header = "Корень:"
+            elif lvl_idx == 0:
+                header = f"Листья (хеши {n_real} транзакций):"
+            else:
+                header = f"Уровень {lvl_idx}:"
+            lines.append(f"  {header}")
+            for i, value in enumerate(level):
+                if lvl_idx == 0 and i < n_real:
+                    tx = block.transactions[i]
+                    lines.append(f"    [{i}] {value[:24]}...  TX-{tx.transaction_id}  {tx.sender} -> {tx.receiver}")
                 elif lvl_idx == 0:
-                    header = f"Листья (хеши {n_real} транзакций):"
+                    lines.append(f"    [{i}] {value[:24]}...  (дубль [{i - 1}])")
                 else:
-                    header = f"Уровень {lvl_idx}:"
-                self.detail_text.insert(tk.END, f"  {header}\n")
-
-                if lvl_idx == 0:
-                    for i, h in enumerate(lvl):
-                        if i < n_real:
-                            tx = block.transactions[i]
-                            self.detail_text.insert(tk.END,
-                                f"    [{i}] {h[:24]}…"
-                                f"  TX-{tx.transaction_id}"
-                                f"  {tx.sender} → {tx.receiver}\n"
-                            )
-                        else:
-                            self.detail_text.insert(tk.END,
-                                f"    [{i}] {h[:24]}…  (дубль [{i - 1}])\n"
-                            )
-                else:
-                    for i, h in enumerate(lvl):
-                        self.detail_text.insert(tk.END,
-                            f"    [{i}] {h[:24]}…\n"
-                        )
-                self.detail_text.insert(tk.END, "\n")
-        else:
-            self.detail_text.insert(tk.END, "\n  (блок не содержит переводов)\n")
-        self.detail_text.config(state="disabled")
-
-    # Логика — дерево Меркла
+                    lines.append(f"    [{i}] {value[:24]}...")
+            lines.append("")
+        return lines
 
     def _open_merkle_window(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("Нет выбора", "Выберите блок в таблице.")
+        row = self.blocks_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Нет выбора", "Выберите блок в таблице.")
             return
-        block = self.bc.chain[int(sel[0])]
+        block = self.bc.chain[row]
         if not block.transactions:
-            messagebox.showinfo("Нет транзакций",
-                                f"Блок #{block.index} не содержит транзакций.")
+            QMessageBox.information(self, "Нет транзакций", f"Блок #{block.index} не содержит транзакций.")
             return
 
-        win = tk.Toplevel(self.root)
-        win.title(f"Дерево Меркла — Блок #{block.index}")
-        win.resizable(True, True)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Дерево Меркла - Блок #{block.index}")
+        dialog.resize(1100, 680)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        header = QLabel(f"Блок #{block.index}  |  {len(block.transactions)} транзакций  |  Корень: {block.merkle_root[:40]}...")
+        header.setObjectName("dialogHeader")
+        layout.addWidget(header)
 
-        ttk.Label(
-            win,
-            text=(f"Блок #{block.index}  •  {len(block.transactions)} транзакций  •  "
-                  f"Корень: {block.merkle_root[:36]}…"),
-            font=("Courier", 9), padding=(8, 4),
-        ).pack(fill=tk.X)
+        scene = QGraphicsScene(dialog)
+        view = QGraphicsView(scene)
+        view.setObjectName("graphicsView")
+        layout.addWidget(view, 1)
+        self._draw_merkle_scene(scene, block)
+        dialog.exec()
 
-        frm = ttk.Frame(win)
-        frm.pack(fill=tk.BOTH, expand=True)
+    def _draw_merkle_scene(self, scene: QGraphicsScene, block):
+        tx_hashes = [tx.tx_hash for tx in block.transactions]
+        n_real_tx = len(tx_hashes)
+        levels = Block.build_merkle_tree(tx_hashes)
+        n_levels = len(levels)
+        n_leaves = len(levels[0])
+        slot = self._MK_NODE_W + self._MK_H_GAP
+        cx_map = {}
 
-        c  = tk.Canvas(frm, bg="white")
-        hs = ttk.Scrollbar(frm, orient="horizontal", command=c.xview)
-        vs = ttk.Scrollbar(frm, orient="vertical",   command=c.yview)
-        c.configure(xscrollcommand=hs.set, yscrollcommand=vs.set)
-        hs.pack(side=tk.BOTTOM, fill=tk.X)
-        vs.pack(side=tk.RIGHT,  fill=tk.Y)
-        c.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        c.bind("<MouseWheel>",
-               lambda e: c.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-
-        cw, ch = self._draw_merkle_canvas(c, block)
-        win.geometry(f"{min(cw + 24, 1100)}x{min(ch + 56, 680)}")
-
-    def _draw_merkle_canvas(self, c: tk.Canvas, block) -> tuple:
-        """Отрисовать дерево Меркла на canvas. Возвращает (canvas_w, canvas_h)."""
-        NW, NH = self._MK_NODE_W, self._MK_NODE_H
-        HG, VG = self._MK_H_GAP,  self._MK_V_GAP
-        PAD    = self._MK_PAD
-
-        tx_hashes  = [tx.tx_hash for tx in block.transactions]
-        n_real_tx  = len(tx_hashes)
-        levels     = Block.build_merkle_tree(tx_hashes)
-        n_lvl      = len(levels)
-        n_leaves   = len(levels[0])
-
-        slot = NW + HG
-
-        # ── Позиции узлов ──────────────────────────────────────────────
-        # Листья расставляем равномерно.
-        cx_map: dict = {}
         for i in range(n_leaves):
-            cx_map[(0, i)] = PAD + i * slot + NW // 2
+            cx_map[(0, i)] = self._MK_PAD + i * slot + self._MK_NODE_W // 2
 
-        # Для каждого уровня выше листьев:
-        #   • «реальных» узлов ceil(n_children / 2) — центрируем над двумя детьми
-        #   • padding-дубль (если n_children нечётное) — сдвигаем вправо от последнего
-        for lvl in range(1, n_lvl):
-            n_children   = len(levels[lvl - 1])
-            n_real_here  = (n_children + 1) // 2   # реальных узлов на этом уровне
+        for lvl in range(1, n_levels):
+            n_children = len(levels[lvl - 1])
+            n_real_here = (n_children + 1) // 2
             n_total_here = len(levels[lvl])
-
             for i in range(n_real_here):
                 li = 2 * i
-                ri = min(2 * i + 1, n_children - 1)  # правый ребёнок (или дубль левого)
+                ri = min(2 * i + 1, n_children - 1)
                 cx_map[(lvl, i)] = (cx_map[(lvl - 1, li)] + cx_map[(lvl - 1, ri)]) // 2
-
-            # Padding-дубли на этом уровне — смещаем правее последнего реального
             for i in range(n_real_here, n_total_here):
                 cx_map[(lvl, i)] = cx_map[(lvl, i - 1)] + slot
 
-        def node_y(lvl: int) -> int:
-            row = n_lvl - 1 - lvl   # корень → row 0 (верх), листья → row n_lvl-1
-            return PAD + row * (NH + VG)
+        def node_y(level: int) -> int:
+            row = n_levels - 1 - level
+            return self._MK_PAD + row * (self._MK_NODE_H + self._MK_V_GAP)
 
-        # canvas_w считаем по реально занятым позициям
-        canvas_w = max(cx_map.values()) + NW // 2 + PAD
-        canvas_h = PAD + n_lvl * (NH + VG) + 24
-        c.configure(scrollregion=(0, 0, canvas_w, canvas_h))
-        c.delete("all")
+        canvas_w = max(cx_map.values()) + self._MK_NODE_W // 2 + self._MK_PAD
+        canvas_h = self._MK_PAD + n_levels * (self._MK_NODE_H + self._MK_V_GAP) + 34
+        scene.setSceneRect(0, 0, canvas_w, canvas_h)
+        edge_pen = QPen(QColor("#506070"), 1.5)
 
-        # ── Рёбра ──────────────────────────────────────────────────────
-        for lvl in range(1, n_lvl):
-            n_children  = len(levels[lvl - 1])
+        for lvl in range(1, n_levels):
+            n_children = len(levels[lvl - 1])
             n_real_here = (n_children + 1) // 2
-
-            for i in range(n_real_here):   # только от реальных узлов
+            for i in range(n_real_here):
                 px = cx_map[(lvl, i)]
-                py = node_y(lvl) + NH
+                py = node_y(lvl) + self._MK_NODE_H
                 li = 2 * i
                 ri = min(2 * i + 1, n_children - 1)
-                for ci in (li, ri):
-                    chx = cx_map[(lvl - 1, ci)]
+                for child_index in (li, ri):
+                    chx = cx_map[(lvl - 1, child_index)]
                     chy = node_y(lvl - 1)
-                    # пунктир, если правый ребёнок — дубль левого
-                    dash = (4, 3) if (ci == ri and li != ri - 1) else ()
-                    c.create_line(px, py, chx, chy,
-                                  fill="#bbb", width=1, dash=dash)
+                    scene.addLine(px, py, chx, chy, edge_pen)
 
-        # ── Узлы ───────────────────────────────────────────────────────
-        COL_ROOT  = "#c86726"
-        COL_INNER = "#d126bd"
-        COL_LEAF  = "#0ad2c1"
-        COL_DUP   = "#bae521"
-
-        for lvl in range(n_lvl):
-            n_children  = len(levels[lvl - 1]) if lvl > 0 else 0
+        colors = {
+            "root": QColor("#d97706"),
+            "inner": QColor("#7c3aed"),
+            "leaf": QColor("#0891b2"),
+            "dup": QColor("#84cc16"),
+        }
+        for lvl in range(n_levels):
+            n_children = len(levels[lvl - 1]) if lvl > 0 else 0
             n_real_here = (n_children + 1) // 2 if lvl > 0 else n_real_tx
-
-            for i, h in enumerate(levels[lvl]):
+            for i, value in enumerate(levels[lvl]):
                 cx = cx_map[(lvl, i)]
-                y  = node_y(lvl)
-                x  = cx - NW // 2
+                y = node_y(lvl)
+                x = cx - self._MK_NODE_W // 2
+                is_root = lvl == n_levels - 1
+                is_leaf = lvl == 0
+                is_dup = (not is_root) and (i >= n_real_here)
+                fill = colors["root"] if is_root else colors["dup"] if is_dup else colors["leaf"] if is_leaf else colors["inner"]
+                rect = scene.addRect(x, y, self._MK_NODE_W, self._MK_NODE_H, QPen(QColor("#d7deea"), 1), QBrush(fill))
 
-                is_root = (lvl == n_lvl - 1)
-                is_leaf = (lvl == 0)
-                is_dup  = (not is_root) and (i >= n_real_here)
-
-                fill = (COL_ROOT  if is_root
-                        else COL_DUP  if is_dup
-                        else COL_LEAF if is_leaf
-                        else COL_INNER)
-
-                c.create_rectangle(x, y, x + NW, y + NH,
-                                   fill=fill, outline="#555", width=1)
-
-                # хеш
-                c.create_text(cx, y + 15,
-                               text=h[:22] + "…", font=("Courier", 8))
-
-                # подпись
-                if is_root:
-                    lbl = "Корень"
-                elif is_dup:
-                    lbl = f"дубль [{i - 1}]"
-                elif is_leaf:
-                    tx  = block.transactions[i]
-                    lbl = f"TX-{tx.transaction_id}  {tx.sender[:12]}→{tx.receiver[:12]}"
-                else:
-                    lbl = f"узел [{i}]"
-
-                c.create_text(cx, y + 33, text=lbl,
-                               font=("TkDefaultFont", 8), fill="#333")
-
-        # ── Легенда ────────────────────────────────────────────────────
-        ly = canvas_h - 18
-        lx = PAD
-        for fill, label in (
-            (COL_ROOT,  "Корень"),
-            (COL_INNER, "Внутренний узел"),
-            (COL_LEAF,  "Транзакция (лист)"),
-            (COL_DUP,   "Дубль листа"),
-        ):
-            c.create_rectangle(lx, ly, lx + 12, ly + 12,
-                                fill=fill, outline="#555")
-            c.create_text(lx + 16, ly + 6, text=label,
-                           anchor="w", font=("TkDefaultFont", 8))
-            lx += 140
-
-        return canvas_w, canvas_h
-
-    # Логика — атака и проверка
+                hash_text = scene.addText(value[:24] + "...", QFont("Consolas", 8))
+                hash_text.setDefaultTextColor(QColor("#f8fafc"))
+                hash_text.setPos(x + 12, y + 8)
+                hash_text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                label = "Корень" if is_root else f"дубль [{i - 1}]" if is_dup else f"TX-{block.transactions[i].transaction_id}" if is_leaf else f"узел [{i}]"
+                label_text = scene.addText(label, QFont("Segoe UI", 8))
+                label_text.setDefaultTextColor(QColor("#f8fafc"))
+                label_text.setPos(x + 12, y + 30)
+                label_text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                rect.setZValue(-1)
 
     def _make_copy(self):
         if self.atk.copy_ready:
-            self._atk_log("[Предыдущая копия удалена — создаётся новая]")
+            self._atk_log("[Предыдущая копия удалена - создается новая]")
         self.atk.make_copy()
         info = self.atk.copy_info()
-        self.copy_info_var.set(info)
-        self.val_copy.set("")
+        self.copy_info_label.setText(info)
+        self.val_copy_label.setText("")
         self._atk_log(f"[Копия создана]  {info}")
-        self.status_var.set("Копия цепочки создана")
+        self._update_dashboard()
+        self.statusBar().showMessage("Копия цепочки создана")
 
     def _attack(self):
-        try:
-            block_idx  = int(self.atk_block.get())
-            tx_idx     = int(self.atk_tx.get())
-            new_amount = float(self.atk_amount.get())
-        except ValueError:
-            messagebox.showerror("Ошибка", "Блок и TX — целые числа, сумма — число.")
-            return
-
-        ok, msg = self.atk.tamper(block_idx, tx_idx, new_amount)
-        if ok:
-            self._atk_log(msg)
-            self.status_var.set("Атака на копию применена — нажмите «Проверить копию»")
-        else:
-            messagebox.showerror("Ошибка атаки", msg)
+        ok, msg = self.atk.tamper(self.atk_block.value(), self.atk_tx.value(), float(self.atk_amount.value()))
+        self._handle_attack_result(ok, msg, "Атака на копию применена - нажмите Проверить копию")
 
     def _attack_replace_sender(self):
-        try:
-            block_idx  = int(self.atk_rs_block.get())
-            tx_idx     = int(self.atk_rs_tx.get())
-            new_sender = self.atk_rs_sender.get().strip()
-        except ValueError:
-            messagebox.showerror("Ошибка", "Блок и TX — целые числа.")
-            return
+        new_sender = self.atk_rs_sender.text().strip()
         if not new_sender:
-            messagebox.showerror("Ошибка", "Новый отправитель не может быть пустым.")
+            QMessageBox.critical(self, "Ошибка", "Новый отправитель не может быть пустым.")
             return
-        ok, msg = self.atk.replace_sender(block_idx, tx_idx, new_sender)
-        if ok:
-            self._atk_log(msg)
-            self.status_var.set("Подмена отправителя применена — нажмите «Проверить копию»")
-        else:
-            messagebox.showerror("Ошибка атаки", msg)
+        ok, msg = self.atk.replace_sender(self.atk_rs_block.value(), self.atk_rs_tx.value(), new_sender)
+        self._handle_attack_result(ok, msg, "Подмена отправителя применена - нажмите Проверить копию")
 
     def _attack_drop_tx(self):
-        try:
-            block_idx = int(self.atk_drop_block.get())
-            tx_idx    = int(self.atk_drop_tx.get())
-        except ValueError:
-            messagebox.showerror("Ошибка", "Блок и TX — целые числа.")
-            return
-        ok, msg = self.atk.drop_transaction(block_idx, tx_idx)
-        if ok:
-            self._atk_log(msg)
-            self.status_var.set("Транзакция удалена из копии — нажмите «Проверить копию»")
-        else:
-            messagebox.showerror("Ошибка атаки", msg)
+        ok, msg = self.atk.drop_transaction(self.atk_drop_block.value(), self.atk_drop_tx.value())
+        self._handle_attack_result(ok, msg, "Транзакция удалена из копии - нажмите Проверить копию")
 
     def _attack_replay(self):
-        try:
-            src_block = int(self.atk_rp_src_block.get())
-            src_tx    = int(self.atk_rp_src_tx.get())
-            dst_block = int(self.atk_rp_dst_block.get())
-        except ValueError:
-            messagebox.showerror("Ошибка", "Все три поля — целые числа.")
-            return
-        ok, msg = self.atk.replay_transaction(src_block, src_tx, dst_block)
-        if ok:
-            self._atk_log(msg)
-            self.status_var.set("Replay-атака применена — нажмите «Проверить копию»")
-        else:
-            messagebox.showerror("Ошибка атаки", msg)
+        ok, msg = self.atk.replay_transaction(
+            self.atk_rp_src_block.value(),
+            self.atk_rp_src_tx.value(),
+            self.atk_rp_dst_block.value(),
+        )
+        self._handle_attack_result(ok, msg, "Replay-атака применена - нажмите Проверить копию")
 
     def _attack_51(self):
-        try:
-            block_idx = int(self.atk_51_block.get())
-        except ValueError:
-            messagebox.showerror("Ошибка", "Начальный блок — целое число.")
-            return
-        ok, msg = self.atk.recompute_from(block_idx)
+        ok, msg = self.atk.recompute_from(self.atk_51_block.value())
+        self._handle_attack_result(ok, msg, "Атака 51% применена - копия пересчитана")
+
+    def _handle_attack_result(self, ok: bool, msg: str, status: str):
         if ok:
             self._atk_log(msg)
-            self.status_var.set(
-                "Атака 51% применена — цепочка пересчитана. "
-                "validate_copy() теперь не найдёт разрыва!"
-            )
+            self.statusBar().showMessage(status)
         else:
-            messagebox.showerror("Ошибка атаки", msg)
+            QMessageBox.critical(self, "Ошибка атаки", msg)
 
     def _validate_original(self):
         valid, msg = self.bc.validate_chain()
-        self.val_orig.set(("✔  Оригинал: " if valid else "✘  Оригинал: ") + msg)
-        self.lbl_val_orig.configure(foreground="darkgreen" if valid else "red")
-        self.status_var.set(msg)
+        prefix = "OK  Оригинал: " if valid else "FAIL  Оригинал: "
+        self.val_orig_label.setText(prefix + msg)
+        self.val_orig_label.setProperty("state", "ok" if valid else "bad")
+        self._refresh_widget_style(self.val_orig_label)
+        self.statusBar().showMessage(msg)
 
     def _validate_copy(self):
         valid, msg = self.atk.validate_copy()
         if valid is None:
-            self.val_copy.set("  Копия: не создана")
+            self.val_copy_label.setText("Копия: не создана")
+            self.val_copy_label.setProperty("state", "warn")
+            self._refresh_widget_style(self.val_copy_label)
             return
         first_line = msg.splitlines()[0]
-        prefix = "✔  Копия: " if valid else "✘  Копия: "
-        self.val_copy.set(prefix + first_line)
+        prefix = "OK  Копия: " if valid else "FAIL  Копия: "
+        self.val_copy_label.setText(prefix + first_line)
+        self.val_copy_label.setProperty("state", "ok" if valid else "bad")
+        self._refresh_widget_style(self.val_copy_label)
         self._atk_log(f"[Проверка копии]\n{msg}")
-        self.status_var.set("Копия: " + first_line)
+        self.statusBar().showMessage("Копия: " + first_line)
 
     def _atk_log(self, msg: str):
-        self.atk_log.config(state="normal")
-        self.atk_log.insert(tk.END, msg + "\n" + "-" * 60 + "\n")
-        self.atk_log.see(tk.END)
-        self.atk_log.config(state="disabled")
-
-    # Таймер блока
+        self.atk_log.appendPlainText(msg + "\n" + "-" * 64)
 
     def _start_timer(self):
         if self._timer_running:
             return
-        self._timer_running   = True
+        self._timer_running = True
         self._timer_remaining = BLOCK_TIMEOUT_SECONDS
-        self._tick()
+        self.block_timer.start()
+        self._update_dashboard()
 
-    def _tick(self):
+    def _tick_block_timer(self):
         if not self._timer_running:
             return
         if not self.bc.pending_transactions:
             self._cancel_timer()
             return
+        self._timer_remaining -= 1
         if self._timer_remaining <= 0:
             self._seal_by_timer()
             return
-        self.timer_var.set(f"Таймер блока: {self._timer_remaining} сек")
-        self._timer_remaining -= 1
-        self._timer_job = self.root.after(1000, self._tick)
+        self._update_dashboard()
 
     def _seal_by_timer(self):
         self._timer_running = False
-        self.timer_var.set("")
+        self.block_timer.stop()
         if not self.bc.pending_transactions:
+            self._update_dashboard()
             return
         self.bc.seal_block()
         n = len(self.bc.chain) - 1
-        self.pool_var.set(f"Пул: {len(self.bc.pending_transactions)} / {TRANSACTIONS_PER_BLOCK}")
-        self._log(f">>> БЛОК #{n} закрыт по таймеру (60 сек)  |  хеш: {self.bc.chain[-1].hash[:24]}...")
+        self._log(f">>> БЛОК #{n} закрыт по таймеру ({BLOCK_TIMEOUT_SECONDS} сек)  |  хеш: {self.bc.chain[-1].hash[:24]}...")
         self.refresh_blocks()
-        self.status_var.set(f"Блок #{n} закрыт по таймеру (60 сек)")
+        self._update_dashboard()
+        self.statusBar().showMessage(f"Блок #{n} закрыт по таймеру ({BLOCK_TIMEOUT_SECONDS} сек)")
 
     def _cancel_timer(self):
         self._timer_running = False
-        self.timer_var.set("")
-        if self._timer_job:
-            self.root.after_cancel(self._timer_job)
-            self._timer_job = None
-
-    # Авто-генератор
+        self.block_timer.stop()
+        self._timer_remaining = 0
+        self._update_dashboard()
 
     def _start_auto(self):
         if self._auto_running:
             return
-        self._auto_running  = True
+        self._auto_running = True
         self._auto_scenario = 0
-        self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
-        self._auto_thread = threading.Thread(target=self._auto_loop, daemon=True)
-        self._auto_thread.start()
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self._begin_auto_scenario()
 
     def _stop_auto(self):
         self._auto_running = False
-        self.btn_start.config(state="normal")
-        self.btn_stop.config(state="disabled")
-        self.auto_status.set("")
-        self.scenario_var.set("")
+        self.auto_timer.stop()
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.auto_status.setText("")
+        self.statusBar().showMessage("Авто-генератор остановлен")
 
-    def _auto_loop(self):
-        configs = [
-            (5, 9,  "Сценарий 1: по количеству (5 TX × 9 сек)"),
-            (3, 22, "Сценарий 2: по таймеру   (3 TX × 22 сек)"),
-        ]
-        while self._auto_running:
-            count, interval, name = configs[self._auto_scenario]
-            self.root.after(0, self.auto_status.set, name)
-            self.root.after(0, self.scenario_var.set, name)
-
-            for _ in range(count):
-                if not self._auto_running:
-                    return
-                self.root.after(0, self._gen_random_tx)
-                self._sleep(interval)
-
-            if self._auto_scenario == 1:
-                self._sleep(10)
-
-            self._auto_scenario = (self._auto_scenario + 1) % len(configs)
-
-    def _sleep(self, seconds: float):
-        deadline = time.time() + seconds
-        while time.time() < deadline and self._auto_running:
-            time.sleep(0.25)
-
-    def _gen_random_tx(self):
+    def _begin_auto_scenario(self):
         if not self._auto_running:
             return
-        tag = "по кол-ву" if self._auto_scenario == 0 else "по таймеру"
-        for key, val in {
-            "reference": random.choice(_REFS),
-            "sender":    random.choice(_SENDERS),
-            "receiver":  random.choice(_RECEIVERS),
-            "passport":  random.choice(_PASSPORTS),
-            "amount":    str(random.randint(10, 500) * 1000),
-            "commission": str(random.choice([0.1, 0.2, 0.3, 0.5, 1.0])),
-        }.items():
-            self.entries[key].delete(0, tk.END)
-            self.entries[key].insert(0, val)
-        self._add_tx(scenario_tag=f"авто/{tag}")
+        configs = [
+            (5, 9, "Сценарий 1: по количеству (5 TX x 9 сек)"),
+            (3, 22, "Сценарий 2: по таймеру (3 TX x 22 сек)"),
+        ]
+        count, interval, name = configs[self._auto_scenario]
+        self._auto_target = count
+        self._auto_interval_ms = interval * 1000
+        self._auto_generated = 0
+        self._auto_waiting_next = False
+        self.auto_status.setText(name)
+        self.statusBar().showMessage(name)
+        self._auto_generate_once()
 
-    def _on_close(self):
+    def _on_auto_timer(self):
+        if not self._auto_running:
+            return
+        if self._auto_waiting_next:
+            self._auto_waiting_next = False
+            self._auto_scenario = (self._auto_scenario + 1) % 2
+            self._begin_auto_scenario()
+            return
+        self._auto_generate_once()
+
+    def _auto_generate_once(self):
+        if not self._auto_running:
+            return
+        tag = "авто/по кол-ву" if self._auto_scenario == 0 else "авто/по таймеру"
+        self._gen_random_tx(tag)
+        self._auto_generated += 1
+
+        if self._auto_generated >= self._auto_target:
+            self._auto_waiting_next = True
+            delay = 10_000 if self._auto_scenario == 1 else self._auto_interval_ms
+            self.auto_timer.start(delay)
+            return
+        self.auto_timer.start(self._auto_interval_ms)
+
+    def _gen_random_tx(self, tag: str):
+        values = {
+            "reference": random.choice(_REFS),
+            "sender": random.choice(_SENDERS),
+            "receiver": random.choice(_RECEIVERS),
+            "passport": random.choice(_PASSPORTS),
+        }
+        for key, value in values.items():
+            self.entries[key].setText(value)
+        self.amount_input.setValue(random.randint(10, 500) * 1000)
+        self.commission_input.setValue(random.choice([0.1, 0.2, 0.3, 0.5, 1.0]))
+        self._add_tx(scenario_tag=tag)
+
+    def _update_dashboard(self):
+        self.pool_card[2].setText(f"{len(self.bc.pending_transactions)} / {TRANSACTIONS_PER_BLOCK}")
+        self.blocks_card[2].setText(str(len(self.bc.chain)))
+        timer_text = f"{self._timer_remaining} сек" if self._timer_running else "ожидание"
+        self.timer_card[2].setText(timer_text)
+        self.copy_card[2].setText("готова" if self.atk.copy_ready else "нет")
+
+    def _refresh_widget_style(self, widget: QWidget):
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def closeEvent(self, event):
         self._auto_running = False
-        self._cancel_timer()
-        self.root.destroy()
-    
+        self.auto_timer.stop()
+        self.block_timer.stop()
+        super().closeEvent(event)

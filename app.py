@@ -1,8 +1,7 @@
 import sys
-import os
-import shutil
 import logging
-import tkinter as tk
+
+from PyQt6.QtWidgets import QApplication
 
 sys.dont_write_bytecode = True
 
@@ -16,6 +15,7 @@ logging.basicConfig(
 )
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    MainWindow(root, Blockchain())
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = MainWindow(Blockchain())
+    window.show()
+    sys.exit(app.exec())
