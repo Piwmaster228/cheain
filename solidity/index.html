@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Мгновенные переводы — Hash-цепочка (Solidity)</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #1e1e2e;
+    --surface:  #2a2a3e;
+    --border:   #3d3d5c;
+    --accent:   #7c6ff7;
+    --accent2:  #5cb8b2;
+    --text:     #cdd6f4;
+    --muted:    #888aaa;
+    --ok:       #a6e3a1;
+    --err:      #f38ba8;
+    --warn:     #fab387;
+    --radius:   8px;
+    --mono:     "Consolas", "Courier New", monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  h1 {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff;
+    padding: 14px 20px;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: .5px;
+  }
+
+  /* ── Tabs ── */
+  .tabs { display: flex; border-bottom: 2px solid var(--border); background: var(--surface); }
+  .tab-btn {
+    padding: 10px 22px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    transition: color .2s, border-color .2s;
+  }
+  .tab-btn:hover   { color: var(--text); }
+  .tab-btn.active  { color: var(--accent); border-color: var(--accent); }
+
+  .tab-content { display: none; padding: 16px; flex: 1; overflow: auto; }
+  .tab-content.active { display: flex; flex-direction: column; gap: 14px; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .card h3 { font-size: 13px; color: var(--accent2); margin-bottom: 10px; letter-spacing: .3px; }
+
+  /* ── Form ── */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .field  { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  .field input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    padding: 7px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .field input:focus { border-color: var(--accent); }
+
+  /* ── Buttons ── */
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  button {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: opacity .2s, filter .2s;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.12); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary   { background: var(--accent);  color: #fff; }
+  .btn-secondary { background: #444466;        color: var(--text); }
+  .btn-ok        { background: #2d7a4f;        color: #fff; }
+  .btn-danger    { background: #7a2d2d;        color: #fff; }
+
+  /* ── Pool indicator ── */
+  .pool-bar-wrap { margin-top: 6px; }
+  .pool-label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .pool-bar {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .pool-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width .4s;
+    border-radius: 3px;
+  }
+
+  /* ── Log ── */
+  .log {
+    background: #111120;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #b0b8e0;
+    padding: 10px 12px;
+    height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .log .ok   { color: var(--ok); }
+  .log .err  { color: var(--err); }
+  .log .sep  { color: #3d3d5c; }
+  .log .info { color: var(--accent2); }
+  .log .warn { color: var(--warn); }
+
+  /* ── Blocks table ── */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    background: #222236;
+    color: var(--muted);
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  td {
+    padding: 7px 10px;
+    border-bottom: 1px solid #2d2d44;
+    font-family: var(--mono);
+    vertical-align: top;
+  }
+  tr.selected td { background: #30304a; }
+  tr:not(.selected):hover td { background: #252538; cursor: pointer; }
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .badge-genesis { background: #2d4a7a; color: #8ab4f8; }
+  .badge-block   { background: #2d4a3d; color: #8af8b4; }
+
+  /* ── Detail panel ── */
+  .detail {
+    background: #111120;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #b0b8e0;
+    padding: 12px;
+    max-height: 260px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* ── Status bar ── */
+  #status-bar {
+    background: #16162a;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 16px;
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 28px;
+  }
+  #timer { color: #7c9fff; font-family: var(--mono); }
+
+  /* ── Validation result ── */
+  .val-result {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 0;
+    min-height: 22px;
+  }
+  .val-result.ok  { color: var(--ok); }
+  .val-result.err { color: var(--err); }
+
+  /* ── Auto-gen row ── */
+  .auto-info { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+
+  /* ── Attack copy info ── */
+  .copy-info { font-size: 12px; color: var(--muted); padding: 4px 0; }
+
+  /* ── Scroll ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>Мгновенные переводы — Hash-цепочка &nbsp;|&nbsp; Solidity Simulation</h1>
+
+<!-- ─── Tab navigation ──────────────────────────────────────────────── -->
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('tx')">  Перевод  </button>
+  <button class="tab-btn"        onclick="switchTab('blocks')">  Блоки  </button>
+  <button class="tab-btn"        onclick="switchTab('attack')">  Атака и проверка  </button>
+</div>
+
+<!-- ═══════════════════════ TAB 1: Перевод ═══════════════════════════ -->
+<div id="tab-tx" class="tab-content active">
+
+  <div class="card">
+    <h3>Новый перевод</h3>
+    <div class="grid2">
+      <div class="field"><label>Номер перевода</label>   <input id="f-ref"    placeholder="ПЕР-1042"></div>
+      <div class="field"><label>Отправитель</label>      <input id="f-sender" placeholder="КЛИЕНТ-0101"></div>
+      <div class="field"><label>Получатель</label>       <input id="f-recv"   placeholder="КЛИЕНТ-0202"></div>
+      <div class="field"><label>Паспорт (ID)</label>     <input id="f-pass"   placeholder="123456789"></div>
+      <div class="field"><label>Сумма перевода</label>   <input id="f-amount" placeholder="50000" type="number" min="0.01" step="0.01"></div>
+      <div class="field"><label>Комиссия (%)</label>     <input id="f-comm"   placeholder="0.5"   type="number" min="0" max="99.99" step="0.01"></div>
+    </div>
+    <div class="btn-row" style="margin-top:12px;">
+      <button class="btn-primary"   onclick="addTx()">Добавить перевод</button>
+      <button class="btn-secondary" onclick="forceSeal()">Запечатать блок</button>
+      <button class="btn-secondary" onclick="fillDemo()">Демо-данные</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="pool-bar-wrap">
+      <div class="pool-label" id="pool-label">Пул: 0 / 5</div>
+      <div class="pool-bar"><div class="pool-fill" id="pool-fill" style="width:0%"></div></div>
+    </div>
+    <div id="scenario-label" style="font-size:12px;color:var(--accent);margin-top:6px;"></div>
+  </div>
+
+  <div class="card">
+    <h3>Авто-генератор</h3>
+    <div class="btn-row">
+      <button class="btn-ok"    id="btn-start" onclick="startAuto()">▶ Запустить</button>
+      <button class="btn-danger" id="btn-stop"  onclick="stopAuto()" disabled>■ Остановить</button>
+      <span id="auto-status" style="font-size:12px;color:var(--muted);align-self:center;margin-left:8px;"></span>
+    </div>
+    <div class="auto-info">
+      Сценарий 1: 5 переводов × 9 сек → блок по количеству<br>
+      Сценарий 2: 3 перевода  × 22 сек → блок по таймеру (60 сек)
+    </div>
+  </div>
+
+  <div style="font-size:12px;color:var(--muted);">Журнал:</div>
+  <div id="log-tx" class="log"></div>
+</div>
+
+<!-- ═══════════════════════ TAB 2: Блоки ════════════════════════════ -->
+<div id="tab-blocks" class="tab-content">
+
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Блок</th>
+            <th>Хеш блока</th>
+            <th>Пред. хеш</th>
+            <th>TX</th>
+            <th>Время</th>
+          </tr>
+        </thead>
+        <tbody id="chain-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div style="font-size:12px;color:var(--muted);">Переводы выбранного блока:</div>
+  <div id="block-detail" class="detail">(выберите блок в таблице)</div>
+
+  <div class="btn-row">
+    <button class="btn-secondary" onclick="refreshBlocks()">Обновить</button>
+  </div>
+</div>
+
+<!-- ═══════════════════ TAB 3: Атака и проверка ═════════════════════ -->
+<div id="tab-attack" class="tab-content">
+
+  <div class="card">
+    <h3>Копия цепочки для атаки</h3>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="makeCopy()">Создать копию</button>
+      <span id="copy-info" class="copy-info">Копия не создана</span>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px;">
+      Атака применяется к копии — оригинальная цепочка не изменяется.
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Параметры атаки</h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="field" style="width:90px;"><label>Блок №</label>  <input id="atk-block"  value="1" type="number" min="1"></div>
+      <div class="field" style="width:80px;"><label>TX №</label>    <input id="atk-tx"     value="0" type="number" min="0"></div>
+      <div class="field" style="width:150px;"><label>Новая сумма</label><input id="atk-amount" value="999999" type="number" min="0"></div>
+      <button class="btn-danger" onclick="doAttack()" style="margin-bottom:0;height:36px;">Подделать</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6;">
+      Данные блока изменяются, его хеш пересчитывается.<br>
+      Следующий блок хранит старый previous_hash — разрыв обнаруживается при проверке.
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Проверка</h3>
+    <div class="btn-row">
+      <button class="btn-ok"      onclick="validateOriginal()">Проверить оригинал</button>
+      <button class="btn-secondary" onclick="validateCopy()">Проверить копию</button>
+    </div>
+    <div id="val-orig" class="val-result" style="margin-top:8px;"></div>
+    <div id="val-copy" class="val-result"></div>
+  </div>
+
+  <div style="font-size:12px;color:var(--muted);">Журнал атак:</div>
+  <div id="log-atk" class="log"></div>
+</div>
+
+<!-- ─── Status bar ─────────────────────────────────────────────────── -->
+<div id="status-bar">
+  <span id="status-msg">Готово</span>
+  <span style="display:flex;align-items:center;gap:12px;">
+    <span id="db-indicator" style="font-size:11px;"></span>
+    <button onclick="resetDB()" title="Удалить сохранённую цепочку и начать заново"
+      style="padding:2px 10px;font-size:11px;background:#5a2020;color:#f0a0a0;border:1px solid #7a3030;border-radius:4px;cursor:pointer;">
+      Сбросить БД
+    </button>
+    <span id="timer"></span>
+  </span>
+</div>
+
+<!-- ════════════════════════ JavaScript ══════════════════════════════ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+<script>
+"use strict";
+
+// ─── Keccak256 helpers (matches Solidity abi.encodePacked) ───────────────────
+
+function keccak256Hex(hex) {
+  return ethers.keccak256('0x' + hex.replace(/^0x/, ''));
+}
+
+/** Encode values for abi.encodePacked, return hex string (no 0x prefix) */
+function solidityPack(types, values) {
+  let hex = '';
+  for (let i = 0; i < types.length; i++) {
+    const t = types[i], v = values[i];
+    if (t === 'uint256') {
+      hex += BigInt(v).toString(16).padStart(64, '0');
+    } else if (t === 'bytes32') {
+      hex += String(v).replace(/^0x/, '').padStart(64, '0').slice(-64);
+    } else if (t === 'string') {
+      // raw UTF-8 bytes, no length prefix
+      const enc = new TextEncoder().encode(String(v));
+      hex += Array.from(enc).map(b => b.toString(16).padStart(2, '0')).join('');
+    } else if (t === 'bytes') {
+      hex += String(v).replace(/^0x/, '');
+    }
+  }
+  return hex;
+}
+
+function keccakPacked(types, values) {
+  return ethers.keccak256('0x' + solidityPack(types, values));
+}
+
+const ZERO32 = '0x' + '00'.repeat(32);
+
+// ─── Blockchain simulation ────────────────────────────────────────────────────
+
+const BLOCK_SIZE    = 5;
+const BLOCK_TIMEOUT = 60; // seconds
+
+class Blockchain {
+  constructor(saved) {
+    if (saved) {
+      this.chain = saved.chain;
+      this.pool  = saved.pool;
+    } else {
+      this.chain = [];
+      this.pool  = [];
+      this._pushGenesis();
+    }
+  }
+
+  _pushGenesis() {
+    const ts   = Math.floor(Date.now() / 1000);
+    const hash = keccakPacked(
+      ['uint256','bytes32','uint256','bytes32','uint256'],
+      [0, ZERO32, ts, ZERO32, 0]
+    );
+    this.chain.push({ index: 0, prevHash: ZERO32, blockHash: hash, timestamp: ts, txs: [] });
+  }
+
+  /** Returns { blockCreated: bool, tx } */
+  addTransaction({ reference, sender, receiver, passportRaw, amount, commission }) {
+    if (amount <= 0)        throw new Error("Сумма должна быть больше нуля");
+    if (commission < 0 || commission >= 10000) throw new Error("Комиссия должна быть от 0 до 99.99%");
+
+    const ts         = Math.floor(Date.now() / 1000);
+    const amountInt  = Math.round(amount * 100);       // kopecks
+    const commBp     = Math.round(commission * 100);   // basis points
+    const netInt     = Math.floor(amountInt * (10000 - commBp) / 10000);
+    const ph         = ethers.keccak256(ethers.toUtf8Bytes(passportRaw));
+
+    // txId: first 8 hex chars of keccak(ts, sender, receiver, amount, poolLen)
+    const rawId = keccakPacked(
+      ['uint256','string','string','uint256','uint256'],
+      [ts, sender, receiver, amountInt, this.pool.length]
+    );
+    const txId = rawId.slice(2, 10).toUpperCase();
+
+    const sig = keccakPacked(
+      ['string','string','string','string','uint256','uint256','uint256'],
+      [txId, reference, sender, receiver, amountInt, netInt, ts]
+    );
+
+    const tx = { txId, reference, sender, receiver, passportHash: ph,
+                 amount: amountInt, commission: commBp, netAmount: netInt, timestamp: ts, signature: sig };
+
+    this.pool.push(tx);
+
+    if (this.pool.length >= BLOCK_SIZE) {
+      this._seal();
+      return { blockCreated: true, tx };
+    }
+    return { blockCreated: false, tx };
+  }
+
+  sealBlock() {
+    if (!this.pool.length) return false;
+    this._seal();
+    return true;
+  }
+
+  _seal() {
+    const idx  = this.chain.length;
+    const prev = this.chain[idx - 1].blockHash;
+    const cnt  = Math.min(this.pool.length, BLOCK_SIZE);
+    const ts   = Math.floor(Date.now() / 1000);
+
+    const txs = this.pool.splice(0, cnt);
+
+    let txsHash = ZERO32;
+    for (const t of txs) {
+      txsHash = keccakPacked(
+        ['bytes32','string','uint256','uint256'],
+        [txsHash, t.txId, t.amount, t.timestamp]
+      );
+    }
+    const hash = keccakPacked(
+      ['uint256','bytes32','uint256','bytes32','uint256'],
+      [idx, prev, ts, txsHash, cnt]
+    );
+    this.chain.push({ index: idx, prevHash: prev, blockHash: hash, timestamp: ts, txs });
+  }
+
+  validateChain() {
+    for (let i = 1; i < this.chain.length; i++) {
+      const cur  = this.chain[i];
+      const prev = this.chain[i - 1];
+      if (cur.prevHash !== prev.blockHash)
+        return { ok: false, msg: `Цепочка нарушена на блоке #${i}: prevHash не совпадает` };
+
+      const recalc = this._calcHash(cur);
+      if (recalc !== cur.blockHash)
+        return { ok: false, msg: `Блок #${i}: хеш изменён (данные подделаны)` };
+    }
+    return { ok: true, msg: `Цепочка корректна — ${this.chain.length} блоков проверено` };
+  }
+
+  _calcHash(block) {
+    let txsHash = ZERO32;
+    for (const t of block.txs) {
+      txsHash = keccakPacked(
+        ['bytes32','string','uint256','uint256'],
+        [txsHash, t.txId, t.amount, t.timestamp]
+      );
+    }
+    return keccakPacked(
+      ['uint256','bytes32','uint256','bytes32','uint256'],
+      [block.index, block.prevHash, block.timestamp, txsHash, block.txs.length]
+    );
+  }
+}
+
+// ─── Attack simulator ─────────────────────────────────────────────────────────
+
+class AttackSimulator {
+  constructor(bc) { this.bc = bc; this.copy = null; }
+
+  makeCopy() {
+    this.copy = JSON.parse(JSON.stringify(this.bc.chain));
+    return this.copy.length;
+  }
+
+  get copyReady() { return this.copy !== null; }
+
+  copyInfo() {
+    if (!this.copy) return "Копия не создана";
+    const txs = this.copy.reduce((s, b) => s + b.txs.length, 0);
+    return `Копия: ${this.copy.length} блоков, ${txs} транзакций`;
+  }
+
+  tamper(blockIdx, txIdx, newAmount) {
+    if (!this.copy) return { ok: false, msg: "Сначала создайте копию цепочки." };
+    if (blockIdx <= 0 || blockIdx >= this.copy.length)
+      return { ok: false, msg: `Блок #${blockIdx} не существует в копии.` };
+
+    const block = this.copy[blockIdx];
+    if (!block.txs.length)
+      return { ok: false, msg: `Блок #${blockIdx} не содержит транзакций.` };
+    if (txIdx >= block.txs.length)
+      return { ok: false, msg: `TX #${txIdx} не существует (в блоке ${block.txs.length} TX).` };
+
+    const tx = block.txs[txIdx];
+    const oldAmount = tx.amount;
+    const newAmountInt = Math.round(newAmount * 100);
+
+    tx.amount    = newAmountInt;
+    tx.netAmount = Math.floor(newAmountInt * (10000 - tx.commission) / 10000);
+
+    // Пересчитать хеш только этого блока
+    let txsHash = ZERO32;
+    for (const t of block.txs) {
+      txsHash = keccakPacked(
+        ['bytes32','string','uint256','uint256'],
+        [txsHash, t.txId, t.amount, t.timestamp]
+      );
+    }
+    const oldHash = block.blockHash;
+    block.blockHash = keccakPacked(
+      ['uint256','bytes32','uint256','bytes32','uint256'],
+      [block.index, block.prevHash, block.timestamp, txsHash, block.txs.length]
+    );
+
+    const isLast = blockIdx === this.copy.length - 1;
+    const warning = isLast
+      ? "\n  ВНИМАНИЕ: это последний блок — разрыв цепи не будет обнаружен при проверке!"
+      : "";
+
+    const msg = [
+      `[Подделка]  Блок #${blockIdx}, TX #${txIdx}`,
+      `  Сумма: ${fmt(oldAmount)} -> ${fmt(newAmountInt)}`,
+      `  Хеш блока #${blockIdx} пересчитан:`,
+      `    старый: ${oldHash}`,
+      `    новый:  ${block.blockHash}`,
+      `  Блок #${blockIdx+1} хранит старый previous_hash → разрыв на блоке #${blockIdx+1}${warning}`
+    ].join('\n');
+
+    return { ok: true, msg };
+  }
+
+  validateCopy() {
+    if (!this.copy) return { ok: null, msg: "Копия не создана — нажмите «Создать копию»" };
+    for (let i = 1; i < this.copy.length; i++) {
+      const cur  = this.copy[i];
+      const prev = this.copy[i - 1];
+      if (cur.prevHash !== prev.blockHash)
+        return { ok: false, msg: [
+          `Цепочка нарушена на блоке #${cur.index}:`,
+          `  Хеш блока #${prev.index}:              ${prev.blockHash}`,
+          `  previous_hash блока #${cur.index}: ${cur.prevHash}`,
+          `  Хеши не совпадают — подделка обнаружена!`
+        ].join('\n') };
+    }
+    return { ok: true, msg: `Копия корректна — ${this.copy.length} блоков проверено` };
+  }
+}
+
+// ─── LocalStorage DB ─────────────────────────────────────────────────────────
+
+const DB = {
+  KEY: 'paymentchain_v1',
+
+  save(bc) {
+    try {
+      localStorage.setItem(this.KEY, JSON.stringify({
+        chain:   bc.chain,
+        pool:    bc.pool,
+        savedAt: Date.now()
+      }));
+    } catch(e) { console.warn('DB save failed:', e); }
+  },
+
+  load() {
+    try {
+      const raw = localStorage.getItem(this.KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch(e) { return null; }
+  },
+
+  clear() { localStorage.removeItem(this.KEY); }
+};
+
+// ─── Globals ──────────────────────────────────────────────────────────────────
+
+const _saved = DB.load();
+const bc  = new Blockchain(_saved);
+const atk = new AttackSimulator(bc);
+
+// Demo data pools
+const REFS      = Array.from({length:99}, (_, i) => `ПЕР-${String(1001+i).padStart(4,'0')}`);
+const SENDERS   = Array.from({length:99}, (_, i) => `КЛИЕНТ-${String(101+i).padStart(4,'0')}`);
+const RECEIVERS = Array.from({length:99}, (_, i) => `КЛИЕНТ-${String(201+i).padStart(4,'0')}`);
+const PASSPORTS = Array.from({length:60}, () => String(Math.floor(Math.random()*900000000+100000000)));
+const COMMS     = [0.1, 0.2, 0.3, 0.5, 1.0];
+
+// Timer state
+let timerRunning   = false;
+let timerRemaining = 0;
+let timerJob       = null;
+
+// Auto state
+let autoRunning  = false;
+let autoScenario = 0;
+let autoTimeout  = null;
+
+// Selected block in Blocks tab
+let selectedBlockIdx = null;
+
+// ─── Format helpers ───────────────────────────────────────────────────────────
+
+/** Format integer kopecks as decimal */
+function fmt(kopecks) {
+  return (kopecks / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtTs(unixSec) {
+  return new Date(unixSec * 1000).toLocaleString('ru-RU', {
+    year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', second:'2-digit'
+  });
+}
+
+function shortHash(h) { return h.slice(0, 24) + '…'; }
+
+function rand(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+
+function setStatus(msg) { document.getElementById('status-msg').textContent = msg; }
+
+function appendLog(id, html) {
+  const el = document.getElementById(id);
+  el.innerHTML += html + '\n<span class="sep">' + '─'.repeat(60) + '</span>\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function txLog(tx, tag) {
+  const t = tag ? ` [${tag}]` : '';
+  appendLog('log-tx',
+    `<span class="info">TX ${tx.txId}${t}  |  Перевод: ${tx.reference}</span>\n` +
+    `  ${tx.sender} → ${tx.receiver}\n` +
+    `  Сумма: ${fmt(tx.amount)}  |  К получению: ${fmt(tx.netAmount)}  (комиссия ${(tx.commission/100).toFixed(2)}%)\n` +
+    `  Хеш паспорта: ${tx.passportHash.slice(2, 42)}…`
+  );
+}
+
+function updatePool() {
+  const n = bc.pool.length;
+  document.getElementById('pool-label').textContent = `Пул: ${n} / ${BLOCK_SIZE}`;
+  document.getElementById('pool-fill').style.width  = (n / BLOCK_SIZE * 100) + '%';
+}
+
+// ─── Tab switching ────────────────────────────────────────────────────────────
+
+function switchTab(id) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  event.currentTarget.classList.add('active');
+  if (id === 'blocks') refreshBlocks();
+}
+
+// ─── Transaction logic ────────────────────────────────────────────────────────
+
+function getFields() {
+  return {
+    reference:   document.getElementById('f-ref').value.trim(),
+    sender:      document.getElementById('f-sender').value.trim(),
+    receiver:    document.getElementById('f-recv').value.trim(),
+    passportRaw: document.getElementById('f-pass').value.trim(),
+    amount:      parseFloat(document.getElementById('f-amount').value) || 0,
+    commission:  parseFloat(document.getElementById('f-comm').value) || 0,
+  };
+}
+
+function clearFields() {
+  ['f-ref','f-sender','f-recv','f-pass','f-amount','f-comm'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+}
+
+function addTx(tag) {
+  try {
+    const { blockCreated, tx } = bc.addTransaction(getFields());
+    const poolWasEmpty = bc.pool.length === 1 && !blockCreated;
+
+    txLog(tx, tag || '');
+
+    if (blockCreated) {
+      cancelTimer();
+      const n = bc.chain.length - 1;
+      appendLog('log-tx',
+        `<span class="ok">>>> БЛОК #${n} закрыт по количеству  |  хеш: ${shortHash(bc.chain[n].blockHash)}</span>`
+      );
+      setStatus(`Блок #${n} закрыт по количеству переводов`);
+      refreshBlocks();
+    } else if (poolWasEmpty || bc.pool.length === 1) {
+      startTimer();
+    }
+
+    DB.save(bc);
+    updatePool();
+    clearFields();
+    return true;
+  } catch(e) {
+    alert(e.message);
+    return false;
+  }
+}
+
+function forceSeal() {
+  if (!bc.pool.length) { alert("Пул пуст — нет переводов для закрытия блока."); return; }
+  cancelTimer();
+  bc.sealBlock();
+  const n = bc.chain.length - 1;
+  DB.save(bc);
+  updatePool();
+  appendLog('log-tx',
+    `<span class="ok">>>> БЛОК #${n} закрыт принудительно  |  хеш: ${shortHash(bc.chain[n].blockHash)}</span>`
+  );
+  setStatus(`Блок #${n} закрыт принудительно`);
+  refreshBlocks();
+}
+
+function fillDemo() {
+  document.getElementById('f-ref').value    = 'ПЕР-1042';
+  document.getElementById('f-sender').value = 'КЛИЕНТ-0101';
+  document.getElementById('f-recv').value   = 'КЛИЕНТ-0202';
+  document.getElementById('f-pass').value   = '123456789';
+  document.getElementById('f-amount').value = '50000';
+  document.getElementById('f-comm').value   = '0.5';
+}
+
+// ─── Block timer ──────────────────────────────────────────────────────────────
+
+function startTimer() {
+  if (timerRunning) return;
+  timerRunning   = true;
+  timerRemaining = BLOCK_TIMEOUT;
+  tick();
+}
+
+function tick() {
+  if (!timerRunning) return;
+  if (!bc.pool.length) { cancelTimer(); return; }
+  if (timerRemaining <= 0) { sealByTimer(); return; }
+  document.getElementById('timer').textContent = `Таймер блока: ${timerRemaining} сек`;
+  timerRemaining--;
+  timerJob = setTimeout(tick, 1000);
+}
+
+function sealByTimer() {
+  timerRunning = false;
+  document.getElementById('timer').textContent = '';
+  if (!bc.pool.length) return;
+  bc.sealBlock();
+  const n = bc.chain.length - 1;
+  DB.save(bc);
+  updatePool();
+  appendLog('log-tx',
+    `<span class="ok">>>> БЛОК #${n} закрыт по таймеру (60 сек)  |  хеш: ${shortHash(bc.chain[n].blockHash)}</span>`
+  );
+  setStatus(`Блок #${n} закрыт по таймеру (60 сек)`);
+  refreshBlocks();
+}
+
+function cancelTimer() {
+  timerRunning = false;
+  document.getElementById('timer').textContent = '';
+  if (timerJob) { clearTimeout(timerJob); timerJob = null; }
+}
+
+// ─── Auto generator ───────────────────────────────────────────────────────────
+
+function startAuto() {
+  if (autoRunning) return;
+  autoRunning  = true;
+  autoScenario = 0;
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled  = false;
+  autoStep();
+}
+
+function stopAuto() {
+  autoRunning = false;
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-stop').disabled  = true;
+  document.getElementById('auto-status').textContent = '';
+  document.getElementById('scenario-label').textContent = '';
+  if (autoTimeout) { clearTimeout(autoTimeout); autoTimeout = null; }
+}
+
+const AUTO_CONFIGS = [
+  { count: 5, interval: 9000,  name: 'Сценарий 1: по количеству (5 TX × 9 сек)' },
+  { count: 3, interval: 22000, name: 'Сценарий 2: по таймеру   (3 TX × 22 сек)' },
+];
+
+let autoTxCount  = 0;
+let autoDelay    = false;
+
+function autoStep() {
+  if (!autoRunning) return;
+
+  const cfg = AUTO_CONFIGS[autoScenario];
+
+  if (autoTxCount === 0) {
+    document.getElementById('auto-status').textContent  = cfg.name;
+    document.getElementById('scenario-label').textContent = cfg.name;
+  }
+
+  if (autoTxCount < cfg.count) {
+    // Generate one transaction
+    const tag = autoScenario === 0 ? 'авто/по кол-ву' : 'авто/по таймеру';
+    document.getElementById('f-ref').value    = rand(REFS);
+    document.getElementById('f-sender').value = rand(SENDERS);
+    document.getElementById('f-recv').value   = rand(RECEIVERS);
+    document.getElementById('f-pass').value   = rand(PASSPORTS);
+    document.getElementById('f-amount').value = String((Math.floor(Math.random() * 490) + 10) * 1000);
+    document.getElementById('f-comm').value   = String(rand(COMMS));
+    addTx(tag);
+    autoTxCount++;
+    autoTimeout = setTimeout(autoStep, cfg.interval);
+  } else {
+    // Switch scenario
+    autoTxCount = 0;
+    const extraDelay = autoScenario === 1 ? 10000 : 0;
+    autoScenario = (autoScenario + 1) % AUTO_CONFIGS.length;
+    autoTimeout  = setTimeout(autoStep, extraDelay);
+  }
+}
+
+// ─── Blocks tab ───────────────────────────────────────────────────────────────
+
+function refreshBlocks() {
+  const tbody = document.getElementById('chain-tbody');
+  tbody.innerHTML = '';
+  bc.chain.forEach(b => {
+    const isGenesis = b.index === 0;
+    const badge = isGenesis
+      ? `<span class="badge badge-genesis">#${b.index} начальный</span>`
+      : `<span class="badge badge-block">#${b.index}</span>`;
+    const tr = document.createElement('tr');
+    if (b.index === selectedBlockIdx) tr.classList.add('selected');
+    tr.innerHTML = `
+      <td>${badge}</td>
+      <td>${shortHash(b.blockHash)}</td>
+      <td>${shortHash(b.prevHash)}</td>
+      <td style="text-align:center;">${b.txs.length}</td>
+      <td>${fmtTs(b.timestamp)}</td>
+    `;
+    tr.onclick = () => { selectedBlockIdx = b.index; showBlockDetail(b); refreshBlocks(); };
+    tbody.appendChild(tr);
+  });
+}
+
+function showBlockDetail(block) {
+  let html = `Блок #${block.index}\n`;
+  html += `  Хеш:       ${block.blockHash}\n`;
+  html += `  Пред. хеш: ${block.prevHash}\n`;
+  html += `  Время:     ${fmtTs(block.timestamp)}\n`;
+
+  if (block.txs.length) {
+    html += `\nПереводы (${block.txs.length}):\n`;
+    for (const tx of block.txs) {
+      html += `\n  TX ${tx.txId}  |  Перевод: ${tx.reference}\n`;
+      html += `  ${tx.sender} → ${tx.receiver}\n`;
+      html += `  Сумма: ${fmt(tx.amount)}  |  К получению: ${fmt(tx.netAmount)}  (комиссия ${(tx.commission/100).toFixed(2)}%)\n`;
+      html += `  Хеш паспорта: ${tx.passportHash}\n`;
+      html += `  Подпись:      ${tx.signature}\n`;
+      html += `  Время:        ${fmtTs(tx.timestamp)}\n`;
+    }
+  } else {
+    html += '\n  (блок не содержит переводов)\n';
+  }
+
+  document.getElementById('block-detail').textContent = html;
+}
+
+// ─── Attack tab ───────────────────────────────────────────────────────────────
+
+function makeCopy() {
+  if (atk.copyReady) appendLog('log-atk', '<span class="warn">[Предыдущая копия удалена — создаётся новая]</span>');
+  atk.makeCopy();
+  const info = atk.copyInfo();
+  document.getElementById('copy-info').textContent = info;
+  document.getElementById('val-copy').textContent  = '';
+  document.getElementById('val-copy').className    = 'val-result';
+  appendLog('log-atk', `<span class="info">[Копия создана]  ${info}</span>`);
+  setStatus("Копия цепочки создана");
+}
+
+function doAttack() {
+  const blockIdx = parseInt(document.getElementById('atk-block').value) || 0;
+  const txIdx    = parseInt(document.getElementById('atk-tx').value)    || 0;
+  const newAmt   = parseFloat(document.getElementById('atk-amount').value) || 0;
+
+  const { ok, msg } = atk.tamper(blockIdx, txIdx, newAmt);
+  if (ok) {
+    appendLog('log-atk', `<span class="warn">${escHtml(msg)}</span>`);
+    setStatus("Атака на копию применена — нажмите «Проверить копию»");
+  } else {
+    alert(msg);
+  }
+}
+
+function validateOriginal() {
+  const { ok, msg } = bc.validateChain();
+  const el = document.getElementById('val-orig');
+  el.textContent = (ok ? '✔  Оригинал: ' : '✘  Оригинал: ') + msg;
+  el.className   = 'val-result ' + (ok ? 'ok' : 'err');
+  setStatus(msg);
+}
+
+function validateCopy() {
+  const { ok, msg } = atk.validateCopy();
+  const el = document.getElementById('val-copy');
+  if (ok === null) {
+    el.textContent = '  Копия: не создана';
+    el.className   = 'val-result';
+    return;
+  }
+  const firstLine = msg.split('\n')[0];
+  el.textContent = (ok ? '✔  Копия: ' : '✘  Копия: ') + firstLine;
+  el.className   = 'val-result ' + (ok ? 'ok' : 'err');
+  appendLog('log-atk',
+    `<span class="${ok ? 'ok' : 'err'}">[Проверка копии]\n${escHtml(msg)}</span>`
+  );
+  setStatus('Копия: ' + firstLine);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function resetDB() {
+  if (!confirm('Удалить сохранённую цепочку и перезапустить приложение?')) return;
+  DB.clear();
+  location.reload();
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
+refreshBlocks();
+updatePool();
+
+if (_saved) {
+  const txTotal = bc.chain.reduce((s, b) => s + b.txs.length, 0);
+  const poolTx  = bc.pool.length;
+  const savedAt = new Date(_saved.savedAt).toLocaleString('ru-RU');
+  document.getElementById('db-indicator').textContent =
+    `💾 БД: ${bc.chain.length} блоков, ${txTotal} TX`;
+  document.getElementById('db-indicator').style.color = '#a6e3a1';
+  appendLog('log-tx',
+    `<span class="ok">[БД] Цепочка загружена из localStorage\n` +
+    `  Блоков: ${bc.chain.length}  |  TX в блоках: ${txTotal}  |  В пуле: ${poolTx}\n` +
+    `  Сохранено: ${savedAt}</span>`
+  );
+  setStatus(`Загружено из БД: ${bc.chain.length} блоков, ${txTotal} транзакций`);
+  if (poolTx > 0) startTimer();
+} else {
+  document.getElementById('db-indicator').textContent = '💾 БД: новая';
+  document.getElementById('db-indicator').style.color = 'var(--muted)';
+}
+</script>
+</body>
+</html>
